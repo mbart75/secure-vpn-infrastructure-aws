@@ -1,0 +1,30 @@
+# ============================================================
+# terraform.tfvars.example — Exemple de personnalisation
+# ============================================================
+# Copier ce fichier en terraform.tfvars et ajuster les valeurs
+# Le fichier terraform.tfvars est dans .gitignore — jamais commité
+#
+# Usage :
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform apply
+# ============================================================
+
+# Région AWS — choisir proche de toi pour la latence
+# aws_region = "eu-west-3"   # Paris (défaut)
+# aws_region = "eu-central-1" # Francfort
+# aws_region = "us-east-1"   # Virginie
+
+# Préfixe pour toutes les ressources AWS créées
+# project_name = "wireguard-perso"
+
+# Port SSH custom (22 par défaut — change en 2222 pour éviter les scans)
+# ssh_port = 2222
+
+# Port UDP WireGuard
+# wireguard_port = 51820
+
+# Chemin vers ta clé publique SSH (Ed25519 recommandé)
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# Clients VPN à créer (un fichier .conf généré par client)
+# wireguard_clients = ["1ProMax5", "1ProMax6", "MacBookAir", "Android", "PCTablette"]

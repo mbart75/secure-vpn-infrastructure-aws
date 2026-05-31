@@ -1,0 +1,28 @@
+# Terraform — ne JAMAIS versionner ces fichiers
+.terraform/
+# NOTE : .terraform.lock.hcl est INTENTIONNELLEMENT commité (NON ignoré)
+# Il fixe les hash SHA256 des providers → protection supply chain (OWASP A08)
+# Sans lui, un attaquant MITM pourrait substituer un provider malveillant
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars            # Variables sensibles (clés AWS, etc.)
+*.tfvars.json
+crash.log
+tfplan-*.bin          # Plans sauvegardés — temporaires, jamais commités
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Clés et configs VPN — ne JAMAIS versionner
+*.pem
+*.key
+*.conf              # Fichiers clients WireGuard
+*-qrcode.txt
+
+# Notes personnelles — jamais versionnées
+NOTES-ENTRETIEN.md
+
+# OS
+.DS_Store
+Thumbs.db
