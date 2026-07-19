@@ -1,62 +1,155 @@
 variable "aws_region" {
-  description = "Région AWS — choisir proche de toi pour la latence"
+  description = "AWS region to deploy into. Pick one close to you for lower latency."
   type        = string
   default     = "eu-west-3" # Paris
 
   validation {
-    condition     = can(regex("^[a-z]{2}-[a-z]+-[0-9]$", var.aws_region))
-    error_message = "La région doit être au format AWS valide (ex: eu-west-3)."
+    condition     = can(regex("^[a-z]{2}(-[a-z]+)+-[0-9]$", var.aws_region))
+    error_message = "Must be a valid AWS region identifier, for example eu-west-3 or ap-southeast-1."
   }
 }
 
 variable "project_name" {
-  description = "Préfixe pour toutes les ressources AWS créées"
+  description = "Prefix applied to the name of every AWS resource created by this stack."
   type        = string
-  default     = "wireguard-perso"
+  default     = "wireguard-vpn"
 
   validation {
     condition     = can(regex("^[a-z0-9-]{3,20}$", var.project_name))
-    error_message = "Le nom doit faire 3-20 caractères, lettres minuscules, chiffres et tirets uniquement."
+    error_message = "Must be 3-20 characters, lowercase letters, digits and hyphens only."
+  }
+}
+
+variable "instance_type" {
+  description = "EC2 instance type. t3.micro is free-tier eligible in most regions."
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "ami_id" {
+  description = <<-EOT
+    Optional AMI to pin. When null, the current Ubuntu 24.04 LTS AMI is resolved
+    from Canonical's public SSM parameter. Pin this for reproducible rebuilds.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.ami_id == null || can(regex("^ami-[0-9a-f]{8,17}$", var.ami_id))
+    error_message = "Must be a valid AMI id such as ami-0123456789abcdef0, or null."
   }
 }
 
 variable "ssh_public_key_path" {
-  description = "Chemin vers ta clé publique SSH"
+  description = "Path to the SSH public key installed on the server. Ed25519 recommended."
   type        = string
-  default     = "~/.ssh/id_ed25519.pub" # Ed25519 recommandé (plus sûr que RSA)
+  default     = "~/.ssh/id_ed25519.pub"
+
+  validation {
+    condition     = endswith(var.ssh_public_key_path, ".pub")
+    error_message = "Must point to a PUBLIC key file ending in .pub, never a private key."
+  }
+}
+
+variable "allowed_ssh_cidr" {
+  description = <<-EOT
+    CIDR range allowed to reach SSH. When null, the public IP of the machine
+    running Terraform is auto-detected and pinned as a /32.
+
+    Set this explicitly when running Terraform offline, from CI, or when you want
+    the security group to stay stable as your own IP changes.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.allowed_ssh_cidr == null || can(cidrnetmask(var.allowed_ssh_cidr))
+    error_message = "Must be a valid IPv4 CIDR such as 203.0.113.4/32, or null to auto-detect."
+  }
 }
 
 variable "ssh_port" {
-  description = "Port SSH custom (évite les scans automatiques sur le port 22)"
+  description = "TCP port the SSH daemon listens on. Changing it also updates the socket unit."
   type        = number
-  default     = 22 # Change si tu veux (ex: 2222) — pense à adapter le SG
+  default     = 22
 
   validation {
     condition     = var.ssh_port >= 1 && var.ssh_port <= 65535
-    error_message = "Le port doit être entre 1 et 65535."
+    error_message = "Must be between 1 and 65535."
   }
 }
 
 variable "wireguard_port" {
-  description = "Port UDP WireGuard"
+  description = "UDP port WireGuard listens on."
   type        = number
-  default     = 51820 # Standard WireGuard
+  default     = 51820
 
   validation {
     condition     = var.wireguard_port >= 1024 && var.wireguard_port <= 65535
-    error_message = "Le port WireGuard doit être entre 1024 et 65535."
+    error_message = "Must be between 1024 and 65535."
   }
 }
 
 variable "wireguard_clients" {
-  description = "Liste des clients VPN à créer automatiquement"
+  description = <<-EOT
+    Devices to generate a VPN client configuration for. One .conf file and one
+    QR code is produced per entry, each with its own key pair, preshared key and
+    VPN address.
+
+    Add or remove entries freely, for example:
+      wireguard_clients = ["phone", "laptop", "tablet", "work-laptop"]
+  EOT
   type        = list(string)
-  default     = [
-    "1ProMax5",    # iPhone 1 Pro Max 5
-    "1ProMax6",    # iPhone 1 Pro Max 6
-    "MacBookAir",  # MacBook Air
-    "Android",     # Téléphone Android
-    "PCTablette"   # PC Tablette
-  ]
-  # Chaque entrée génère un .conf + QR code — un fichier par appareil
+  default     = ["phone", "laptop"]
+
+  validation {
+    condition     = length(var.wireguard_clients) >= 1
+    error_message = "At least one client is required."
+  }
+
+  validation {
+    # Names become filenames and shell words on the server, so keep them boring.
+    condition = alltrue([
+      for name in var.wireguard_clients : can(regex("^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$", name))
+    ])
+    error_message = "Client names must be 1-32 chars, letters, digits, underscore or hyphen, starting with a letter or digit."
+  }
+
+  validation {
+    condition     = length(distinct(var.wireguard_clients)) == length(var.wireguard_clients)
+    error_message = "Client names must be unique."
+  }
+}
+
+variable "vpn_network_cidr" {
+  description = "Private network used inside the tunnel. The server takes the first usable address."
+  type        = string
+  default     = "10.8.0.0/24"
+
+  validation {
+    condition     = can(cidrnetmask(var.vpn_network_cidr))
+    error_message = "Must be a valid IPv4 CIDR such as 10.8.0.0/24."
+  }
+}
+
+variable "vpc_cidr" {
+  description = "CIDR of the dedicated VPC created for the VPN server."
+  type        = string
+  default     = "10.20.0.0/24"
+
+  validation {
+    condition     = can(cidrnetmask(var.vpc_cidr))
+    error_message = "Must be a valid IPv4 CIDR such as 10.20.0.0/24."
+  }
+}
+
+variable "client_dns_servers" {
+  description = "DNS resolvers pushed to VPN clients. Defaults to Cloudflare."
+  type        = list(string)
+  default     = ["1.1.1.1", "1.0.0.1"]
+
+  validation {
+    condition     = length(var.client_dns_servers) > 0
+    error_message = "At least one DNS server is required, otherwise clients leak DNS to their local network."
+  }
 }
