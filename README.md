@@ -9,7 +9,7 @@ Ephemeral, hardened WireGuard VPN infrastructure defined entirely in Terraform. 
 
 ---
 
-## Contents
+## 📖 Contents
 
 - [Why this exists](#why-this-exists)
 - [Architecture](#architecture)
@@ -27,7 +27,8 @@ Ephemeral, hardened WireGuard VPN infrastructure defined entirely in Terraform. 
 
 ---
 
-## Why this exists
+<a id="why-this-exists"></a>
+## 🎯 Why this exists
 
 Public Wi-Fi on the road is untrusted by default, and commercial VPN providers ask you to trade one trusted third party for another. This project provisions a VPN server that **you** own, on infrastructure **you** control, from a configuration you can read end to end in about 300 lines.
 
@@ -43,7 +44,8 @@ It is built to be ephemeral. Deploying takes one command, destroying takes one c
 
 ---
 
-## Architecture
+<a id="architecture"></a>
+## 🏗️ Architecture
 
 ```
 Your device                          AWS region
@@ -72,7 +74,8 @@ All resources are created by Terraform, so `terraform destroy` removes all of th
 
 ---
 
-## Quick start
+<a id="quick-start"></a>
+## 🚀 Quick start
 
 ### Prerequisites
 
@@ -141,7 +144,8 @@ This deletes everything, including the Elastic IP. Your next deployment gets a n
 
 ---
 
-## Configuring your devices
+<a id="configuring-your-devices"></a>
+## 📱 Configuring your devices
 
 Every entry in `wireguard_clients` produces one `.conf` file and one QR code on the server, each with its own key pair, preshared key and address inside the tunnel. There is no shared configuration between devices, so you can revoke one by removing it and reapplying.
 
@@ -167,7 +171,8 @@ Names accept letters, digits, hyphens and underscores, up to 32 characters, and 
 
 ---
 
-## Configuration reference
+<a id="configuration-reference"></a>
+## ⚙️ Configuration reference
 
 | Variable | Default | Description |
 |---|---|---|
@@ -188,7 +193,8 @@ Every variable is validated: invalid regions, malformed CIDRs, a private key pas
 
 ---
 
-## Security controls
+<a id="security-controls"></a>
+## 🔐 Security controls
 
 ### Infrastructure
 
@@ -233,7 +239,8 @@ Being explicit matters more than a longer feature list:
 
 ---
 
-## Cost
+<a id="cost"></a>
+## 💸 Cost
 
 Prices are for `eu-west-3` and exclude tax. Check the [AWS pricing pages](https://aws.amazon.com/ec2/pricing/on-demand/) for your region.
 
@@ -252,7 +259,8 @@ Accounts created since mid-2025 use the newer credit-based free plan rather than
 
 ---
 
-## IAM setup
+<a id="iam-setup"></a>
+## 🔧 IAM setup
 
 Create a dedicated IAM user for deployments rather than using your root account or an administrator. This policy limits it to the regions you actually deploy to and to resources carrying the project prefix.
 
@@ -324,7 +332,8 @@ The `SessionManagerAccess` statement is what makes the SSM fallback usable: if y
 
 ---
 
-## Operating the server
+<a id="operating-the-server"></a>
+## 🔍 Operating the server
 
 Terraform renders every command with the port and key path you configured:
 
@@ -353,7 +362,8 @@ Using a single workspace across regions would leave the previous region's resour
 
 ---
 
-## Design decisions
+<a id="design-decisions"></a>
+## 🧭 Design decisions
 
 Notes on the trade-offs, since the reasoning is more interesting than the resource list.
 
@@ -373,7 +383,8 @@ Notes on the trade-offs, since the reasoning is more interesting than the resour
 
 ---
 
-## Limitations
+<a id="limitations"></a>
+## ⚠️ Limitations
 
 Known gaps, in rough priority order:
 
@@ -386,7 +397,8 @@ Known gaps, in rough priority order:
 
 ---
 
-## Project structure
+<a id="project-structure"></a>
+## 📁 Project structure
 
 ```
 .
@@ -405,6 +417,7 @@ Known gaps, in rough priority order:
 
 ---
 
-## License
+<a id="license"></a>
+## 📄 License
 
 [MIT](LICENSE) — use it, fork it, adapt it.
