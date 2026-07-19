@@ -92,12 +92,12 @@ bash deploy.command      # or double-click deploy.command in Finder
 
 The script checks and updates your toolchain via Homebrew, stores your AWS keys in the macOS Keychain with `aws-vault`, asks which region and which devices you want, shows you the plan, and applies it after you confirm.
 
-It does not install Homebrew for you, does not edit your shell profile, and does not touch your Git repository.
+It never installs Homebrew for you, never edits your shell profile, and never runs a Git command: nothing from your working copy is committed or pushed anywhere.
 
 ### Option B — plain Terraform (any platform)
 
 ```bash
-git clone https://github.com/<your-username>/secure-vpn-infrastructure-aws.git
+git clone https://github.com/mbart75/secure-vpn-infrastructure-aws.git
 cd secure-vpn-infrastructure-aws
 
 cp terraform.tfvars.example terraform.tfvars   # optional, all values have defaults
@@ -190,6 +190,22 @@ Names accept letters, digits, hyphens and underscores, up to 32 characters, and 
 | `ami_id` | *latest Ubuntu 24.04* | Pin an AMI for reproducible rebuilds |
 
 Every variable is validated: invalid regions, malformed CIDRs, a private key passed where a public key is expected, or more clients than the VPN network can hold all fail at plan time with an explicit message.
+
+### A note on the default ports
+
+**SSH stays on 22 on purpose.** Moving SSH to a high port is obscurity, not security: a port scan finds it in seconds. Here it would buy even less, because the security group already drops every packet from any address other than yours before it ever reaches the daemon. Access control is doing the work, not the port number. Moving it does cut noise in the auth log, and `ssh_port` is there if you want that, but be aware that restrictive networks are more likely to allow outbound 22 than an unusual port, which matters when the whole point is connecting from hotel and airport Wi-Fi.
+
+**WireGuard stays on 51820 by default, but change it if a network blocks you.** 51820 is WireGuard's registered port, which makes it an easy target for networks that filter VPNs by port: hotel, corporate and campus Wi-Fi, some public hotspots, some mobile carriers, and national-level filtering. Home ISPs rarely block it.
+
+If the tunnel will not establish from a given network, redeploying on UDP 443 is usually enough:
+
+```bash
+terraform apply -var='wireguard_port=443'
+```
+
+UDP 443 carries QUIC and HTTP/3, so it is almost never blocked and the traffic blends into ordinary web usage. Since the whole stack is disposable, switching takes about five minutes and issues new client configurations.
+
+This defeats port-based filtering only. WireGuard's handshake has a recognisable signature, so deep packet inspection can still identify and block the protocol regardless of the port. Defeating that needs obfuscation the protocol does not provide on its own.
 
 ---
 
