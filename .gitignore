@@ -1,28 +1,37 @@
-# Terraform — ne JAMAIS versionner ces fichiers
+# ── Terraform ─────────────────────────────────────────────────────────────────
 .terraform/
-# NOTE : .terraform.lock.hcl est INTENTIONNELLEMENT commité (NON ignoré)
-# Il fixe les hash SHA256 des providers → protection supply chain (OWASP A08)
-# Sans lui, un attaquant MITM pourrait substituer un provider malveillant
+.terraform.tfstate.lock.info
+
+# State can contain resource metadata and is machine-specific. Never commit it.
 terraform.tfstate
 terraform.tfstate.backup
-*.tfvars            # Variables sensibles (clés AWS, etc.)
+terraform.tfstate.d/
+
+# Variable files may hold IP addresses and other environment detail.
+# terraform.tfvars.example is intentionally tracked.
+*.tfvars
 *.tfvars.json
+
+# Saved plan artifacts.
+tfplan-*.bin
+*.tfplan
+
 crash.log
-tfplan-*.bin          # Plans sauvegardés — temporaires, jamais commités
+crash.*.log
+
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
 
-# Clés et configs VPN — ne JAMAIS versionner
+# ── Keys and VPN material — never commit ──────────────────────────────────────
+# .terraform.lock.hcl is intentionally tracked: it pins provider checksums.
 *.pem
 *.key
-*.conf              # Fichiers clients WireGuard
+*.conf
 *-qrcode.txt
+wireguard-clients/
 
-# Notes personnelles — jamais versionnées
-NOTES-ENTRETIEN.md
-
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
