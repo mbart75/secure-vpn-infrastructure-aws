@@ -42,6 +42,10 @@ id_*_key
 *_rsa
 *_ed25519
 
+# ── Notes de session locales — jamais publiées ────────────────────────────────
+Transmission.md
+transmissions/
+
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
