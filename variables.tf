@@ -84,9 +84,11 @@ variable "wireguard_port" {
   type        = number
   default     = 51820
 
+  # Privileged ports are allowed: wg-quick is started by systemd as root, and
+  # UDP 443 is the usual fallback when a network filters the WireGuard port.
   validation {
-    condition     = var.wireguard_port >= 1024 && var.wireguard_port <= 65535
-    error_message = "Must be between 1024 and 65535."
+    condition     = var.wireguard_port >= 1 && var.wireguard_port <= 65535
+    error_message = "Must be between 1 and 65535."
   }
 }
 

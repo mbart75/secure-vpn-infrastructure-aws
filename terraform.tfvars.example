@@ -37,7 +37,12 @@
 # ssh_port = 2222
 
 # UDP port WireGuard listens on.
+# 51820 is the standard port and works on most networks, including home ISPs.
+# Hotel, corporate and campus Wi-Fi sometimes filter it. UDP 443 carries QUIC
+# and HTTP/3, so it is almost never blocked and blends into normal web traffic.
+# Set this before you travel rather than discovering the block on arrival.
 # wireguard_port = 51820
+# wireguard_port = 443
 
 # Public key installed on the server. Must be a .pub file, never a private key.
 # ssh_public_key_path = "~/.ssh/id_ed25519.pub"
