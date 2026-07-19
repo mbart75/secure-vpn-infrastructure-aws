@@ -1,52 +1,73 @@
 #!/bin/bash
 # ==============================================================================
-# WireGuard - Installation sécurisée & future-proof
-# Bonnes pratiques : OWASP, CIS Benchmark, hardening Linux
+# WireGuard VPN server bootstrap — Ubuntu 24.04 LTS
+#
+# Rendered by Terraform via templatefile(); see the user_data block in main.tf.
+# Because of that, a literal dollar-brace sequence must be written doubled ($$)
+# so it survives templating and reaches the shell intact.
+#
+# Runs once, at first boot, as root, under cloud-init.
 # ==============================================================================
-
 set -euo pipefail
+
 LOG="/var/log/wireguard-setup.log"
+DONE_MARKER="/var/lib/wireguard-setup.done"
+
+install -m 600 /dev/null "$LOG"
 exec > >(tee -a "$LOG") 2>&1
-# Restreindre immédiatement les permissions du log (données opérationnelles sensibles)
-touch "$LOG"
-chmod 600 "$LOG"
+trap 'echo "[FAILED] bootstrap aborted on line $LINENO"' ERR
 
-echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║         WireGuard Setup - $(date '+%Y-%m-%d %H:%M:%S')          ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-
-WG_PORT="${wg_port}"
-SSH_PORT="${ssh_port}"
+# ── Values injected by Terraform ──────────────────────────────────────────────
 PROJECT="${project_name}"
-CLIENTS_JSON='${wg_clients}'
+SSH_PORT="${ssh_port}"
+WG_PORT="${wg_port}"
+SERVER_PUBLIC_IP="${server_public_ip}"
+SERVER_VPN_ADDRESS="${server_vpn_address}"
+CLIENT_DNS="${client_dns}"
+# Space separated "name:address" pairs. Names are validated in variables.tf.
+CLIENT_SPECS="${client_specs}"
+
 WG_DIR="/etc/wireguard"
 CLIENTS_DIR="/home/ubuntu/wireguard-clients"
 OPT_DIR="/opt/wireguard"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. MISE À JOUR SYSTÈME COMPLÈTE (future-proof : toujours les derniers patchs)
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [1/9] Mise à jour système..."
+echo "=============================================="
+echo " WireGuard bootstrap — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo " Project: $PROJECT"
+echo "=============================================="
 
-# Forcer le mode non-interactif pour éviter les dialogs debconf/whiptail
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. System packages
+# ──────────────────────────────────────────────────────────────────────────────
+echo "[1/8] Updating the system and installing packages..."
+
 export DEBIAN_FRONTEND=noninteractive
-
-# Pré-configurer debconf pour ne pas demander de redémarrage interactif
 echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
 echo '* libraries/restart-without-asking boolean true' | debconf-set-selections
 
 apt-get update -y
-apt-get upgrade -y \
-  -o Dpkg::Options::='--force-confdef' \
-  -o Dpkg::Options::='--force-confold'
+
+# dist-upgrade is a superset of upgrade, so running both only duplicates work.
 apt-get dist-upgrade -y \
   -o Dpkg::Options::='--force-confdef' \
   -o Dpkg::Options::='--force-confold'
 
-# Mises à jour automatiques de sécurité (OWASP A06 - Vulnerable Components)
-apt-get install -y unattended-upgrades apt-listchanges
+# One transaction rather than five: fewer dependency resolutions, faster boot.
+apt-get install -y \
+  wireguard \
+  wireguard-tools \
+  qrencode \
+  ufw \
+  fail2ban \
+  python3-systemd \
+  unattended-upgrades \
+  apt-listchanges
+
+echo "  WireGuard: $(dpkg-query -W -f='$${Version}' wireguard-tools)"
+echo "  Kernel:    $(uname -r)"
+
+# Unattended security updates. Reboots are disabled on purpose: an automatic
+# reboot would drop every VPN session without warning.
 cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
 Unattended-Upgrade::Allowed-Origins {
     "$${distro_id}:$${distro_codename}-security";
@@ -56,402 +77,330 @@ Unattended-Upgrade::Allowed-Origins {
 Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "false";  // Pas de reboot auto = pas de coupure VPN
+Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::SyslogEnable "true";
 EOF
 
-echo unattended-upgrades unattended-upgrades/enable_auto_updates boolean true | debconf-set-selections
-dpkg-reconfigure -f noninteractive unattended-upgrades
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
 
-echo "✅ Système à jour"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. INSTALLATION WIREGUARD (toujours la dernière version)
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [2/9] Installation WireGuard..."
-
-# WireGuard est dans le noyau Linux depuis 5.6 (Ubuntu 24.04 = kernel 6.x)
-# → apt install wireguard installe toujours la version du noyau actuel
-apt-get install -y wireguard wireguard-tools qrencode
-
-WG_VERSION=$(dpkg -l wireguard-tools | awk '/wireguard-tools/{print $3}')
-echo "✅ WireGuard installé — version : $WG_VERSION"
-echo "   Kernel : $(uname -r)"
+echo "  System up to date."
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. HARDENING SSH
-# OWASP A07 - Identification and Authentication Failures
+# 2. SSH hardening
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [3/9] Hardening SSH..."
+echo "[2/8] Hardening SSH..."
 
-# Backup de la config originale
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
-
-cat > /etc/ssh/sshd_config << EOF
-# ── WireGuard Server SSH Config (Hardened) ──
+# A drop-in rather than a rewrite of /etc/ssh/sshd_config: the packaged file
+# keeps receiving upstream security fixes, and openssh-server upgrades will not
+# raise a conffile conflict. Directives are first-match-wins, and the 00- prefix
+# makes this file win over cloud-init's own drop-in.
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/00-hardening.conf << EOF
 Port $SSH_PORT
 AddressFamily inet
-ListenAddress 0.0.0.0
 
-# Protocole et crypto modernes uniquement
-Protocol 2
-HostKey /etc/ssh/ssh_host_ed25519_key
-HostKey /etc/ssh/ssh_host_rsa_key
+# Offer only the Ed25519 host key.
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
-# Algorithmes sécurisés (NIST/OpenSSH recommandations 2024)
+# Modern key exchange, ciphers and MACs only.
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com
 
-# Authentification — clé uniquement, jamais de mot de passe
+# Public key authentication only.
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
 PermitEmptyPasswords no
-ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
-# UsePAM yes : Ubuntu 24.04 nécessite PAM pour la gestion des sessions systemd
-# Les passwords sont désactivés ci-dessus — PAM ne sert qu'à la session, pas à l'auth
-UsePAM yes
+AuthorizedKeysFile .ssh/authorized_keys
+AllowUsers ubuntu
 
-# Restrictions de session
+# Session limits.
 MaxAuthTries 3
 MaxSessions 3
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
 
-# Désactiver les fonctionnalités inutiles et risquées
+# Disable features this host has no use for.
 X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
 PermitTunnel no
 GatewayPorts no
-PrintMotd yes
 
-# Logging
-SyslogFacility AUTH
 LogLevel VERBOSE
-
-# Restreindre à l'utilisateur ubuntu uniquement
-AllowUsers ubuntu
-
-# SFTP subsystem (nécessaire pour scp)
-Subsystem sftp /usr/lib/openssh/sftp-server
 EOF
 
-# Régénérer uniquement les clés hôtes modernes (supprimer les existantes d'abord)
-rm -f /etc/ssh/ssh_host_dsa_key* /etc/ssh/ssh_host_ecdsa_key* \
-      /etc/ssh/ssh_host_ed25519_key* /etc/ssh/ssh_host_rsa_key*
-ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N "" -q
-ssh-keygen -t rsa -b 4096 -f /etc/ssh/ssh_host_rsa_key -N "" -q
+# Remove the legacy host key types rather than merely refusing to offer them.
+rm -f /etc/ssh/ssh_host_dsa_key* /etc/ssh/ssh_host_ecdsa_key*
 
-systemctl restart ssh
-echo "✅ SSH hardené — authentification par clé uniquement"
+# A malformed drop-in would make sshd refuse to start, and SSH is how client
+# configs get retrieved. Validate first, roll back if the config is rejected.
+if sshd -t; then
+  echo "  sshd configuration valid."
+else
+  echo "  sshd rejected the hardening drop-in — rolling it back."
+  rm -f /etc/ssh/sshd_config.d/00-hardening.conf
+fi
+
+# Ubuntu 24.04 starts sshd through socket activation. The listening port comes
+# from ssh.socket, which is generated from sshd_config at daemon-reload time, so
+# "systemctl restart ssh" alone would leave the listener on port 22 and lock the
+# operator out whenever ssh_port is customised.
+if systemctl list-unit-files ssh.socket &> /dev/null && systemctl is-enabled ssh.socket &> /dev/null; then
+  mkdir -p /etc/systemd/system/ssh.socket.d
+  cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
+[Socket]
+ListenStream=
+ListenStream=$SSH_PORT
+EOF
+  systemctl daemon-reload
+  systemctl restart ssh.socket
+  echo "  ssh.socket now listening on port $SSH_PORT."
+else
+  systemctl daemon-reload
+  systemctl restart ssh
+  echo "  sshd restarted on port $SSH_PORT."
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. HARDENING KERNEL (sysctl)
-# OWASP A05 - Security Misconfiguration
+# 3. Kernel hardening
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [4/9] Hardening kernel (sysctl)..."
+echo "[3/8] Applying kernel hardening..."
 
 cat > /etc/sysctl.d/99-wireguard-hardening.conf << 'EOF'
-# ── Réseau ──
-# Activation du forwarding IP (indispensable pour WireGuard)
+# Routing — required for the VPN to forward client traffic.
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 
-# Protection SYN flood
+# SYN flood mitigation.
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_syn_retries = 2
 net.ipv4.tcp_synack_retries = 2
 
-# Protection contre le spoofing
+# Reverse path filtering, anti spoofing.
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 
-# Désactiver les redirections ICMP
+# Ignore and never send ICMP redirects.
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
 
-# Désactiver les source routes
+# Reject source routed packets.
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 
-# Log des paquets suspects (martians)
+# Log impossible addresses.
 net.ipv4.conf.all.log_martians = 1
 
-# ── Mémoire & Processus ──
-# Protection Stack Smashing
+# Memory and process protections.
 kernel.randomize_va_space = 2
-
-# Restreindre l'accès aux logs kernel
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
-
-# Désactiver le SysRq (accès console non autorisé)
 kernel.sysrq = 0
-
-# Protection ptrace (empêche un process de lire la mémoire d'un autre)
 kernel.yama.ptrace_scope = 1
 EOF
 
-sysctl --system
-echo "✅ Kernel hardené"
+sysctl --system > /dev/null
+echo "  sysctl policy applied."
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. PARE-FEU UFW
-# OWASP A05 - Security Misconfiguration
+# 4. Firewall
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [5/9] Configuration UFW..."
+echo "[4/8] Configuring UFW..."
 
-apt-get install -y ufw
+# UFW defaults the FORWARD policy to DROP, which silently breaks VPN routing:
+# clients complete the handshake but no traffic reaches the internet.
+sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
-ufw --force reset
+ufw --force reset > /dev/null
 ufw default deny incoming
 ufw default allow outgoing
 
-# SSH
-ufw allow $SSH_PORT/tcp comment "SSH"
-
-# WireGuard
-ufw allow $WG_PORT/udp comment "WireGuard VPN"
-
-# Limiter les tentatives SSH (brute force protection)
-ufw limit $SSH_PORT/tcp comment "SSH rate limit"
+# "limit" both allows and rate limits, so a separate allow rule is redundant.
+ufw limit "$SSH_PORT/tcp" comment "SSH (rate limited)"
+ufw allow "$WG_PORT/udp" comment "WireGuard"
 
 ufw --force enable
 ufw status verbose
-echo "✅ UFW configuré"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. FAIL2BAN (protection brute force SSH)
-# OWASP A07 - Identification and Authentication Failures
+# 5. Fail2ban
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [6/9] Installation Fail2ban..."
+echo "[5/8] Configuring fail2ban..."
 
-apt-get install -y fail2ban
-
+# No inline comments: fail2ban parses everything after "=" as the value, so a
+# trailing "; comment" would make bantime unparseable.
 cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
-bantime  = 3600      ; Ban 1 heure
-findtime = 600       ; Fenêtre de 10 minutes
-maxretry = 3         ; 3 tentatives max
+bantime  = 3600
+findtime = 600
+maxretry = 3
 backend  = systemd
 
 [sshd]
 enabled  = true
 port     = $SSH_PORT
-logpath  = %(sshd_log)s
 maxretry = 3
-bantime  = 86400     ; SSH : ban 24h
+bantime  = 86400
 EOF
 
-systemctl enable fail2ban
+systemctl enable fail2ban > /dev/null
 systemctl restart fail2ban
-echo "✅ Fail2ban actif"
+echo "  fail2ban active."
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7. CONFIGURATION WIREGUARD
+# 6. WireGuard
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [7/9] Configuration WireGuard..."
+echo "[6/8] Configuring WireGuard..."
 
-mkdir -p "$WG_DIR" "$CLIENTS_DIR"
-chmod 700 "$WG_DIR"
-chmod 700 "$CLIENTS_DIR"
+install -d -m 700 "$WG_DIR"
+install -d -m 700 -o ubuntu -g ubuntu "$CLIENTS_DIR"
 
-# Génération des clés serveur
 SERVER_PRIVATE_KEY=$(wg genkey)
 SERVER_PUBLIC_KEY=$(echo "$SERVER_PRIVATE_KEY" | wg pubkey)
-# NOTE : pas de preshared key serveur globale — une PSK par client est générée plus bas
 
-echo "Clé publique serveur : $SERVER_PUBLIC_KEY"
+# Private keys are generated here and never leave the instance, so they are
+# absent from the Terraform state and from any CI log.
+echo "  Server public key: $SERVER_PUBLIC_KEY"
+echo "  Server endpoint:   $SERVER_PUBLIC_IP:$WG_PORT"
 
-# Obtenir l'IP publique de l'instance (avec IMDSv2 obligatoire)
-TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-SERVER_PUBLIC_IP=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
-  "http://169.254.169.254/latest/meta-data/public-ipv4")
+MAIN_IFACE=$(ip route show default | awk '{print $5}' | head -1)
+echo "  Uplink interface:  $MAIN_IFACE"
 
-echo "IP publique détectée : $SERVER_PUBLIC_IP"
-
-# Interface réseau principale
-MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-echo "Interface réseau : $MAIN_IFACE"
-
-# Génération dynamique des clients depuis la liste JSON Terraform
-# On parse le JSON avec Python (toujours dispo sur Ubuntu)
-readarray -t CLIENTS < <(echo "$CLIENTS_JSON" | python3 -c "
-import json, sys
-clients = json.load(sys.stdin)
-for c in clients:
-    print(c)
-")
-
-echo "Clients à créer : $${CLIENTS[*]}"
-
-# Construction de la config serveur
+# No DNS directive here: DNS= is a wg-quick client-side setting and has no
+# meaning in a server configuration.
+umask 077
 cat > "$WG_DIR/wg0.conf" << EOF
 [Interface]
-# Serveur WireGuard — généré le $(date '+%Y-%m-%d %H:%M:%S')
+# $PROJECT — generated $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 PrivateKey = $SERVER_PRIVATE_KEY
-Address    = 10.8.0.1/24
+Address    = $SERVER_VPN_ADDRESS
 ListenPort = $WG_PORT
-DNS        = 1.1.1.1, 1.0.0.1   # Cloudflare — change si tu veux
 
-# Règles NAT pour faire transiter le trafic clients vers internet
 PostUp   = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $MAIN_IFACE -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $MAIN_IFACE -j MASQUERADE
-
 EOF
 
-chmod 600 "$WG_DIR/wg0.conf"
-
-# Génération d'un fichier .conf par client
-CLIENT_IP_BASE=2  # 10.8.0.2, 10.8.0.3, ...
-
-for CLIENT_NAME in "$${CLIENTS[@]}"; do
-  echo "  → Création client : $CLIENT_NAME"
+# Each client gets its own key pair, its own preshared key and its own address.
+# Addresses are allocated by Terraform, so there is no IP arithmetic here.
+for SPEC in $CLIENT_SPECS; do
+  CLIENT_NAME="$${SPEC%%:*}"
+  CLIENT_IP="$${SPEC##*:}"
 
   CLIENT_PRIVATE_KEY=$(wg genkey)
   CLIENT_PUBLIC_KEY=$(echo "$CLIENT_PRIVATE_KEY" | wg pubkey)
-  CLIENT_PRESHARED_KEY=$(wg genpsk)   # Couche de sécurité supplémentaire
-  CLIENT_IP="10.8.0.$CLIENT_IP_BASE"
+  CLIENT_PRESHARED_KEY=$(wg genpsk)
 
-  # Ajouter le peer dans la config serveur
   cat >> "$WG_DIR/wg0.conf" << EOF
-# ── Client : $CLIENT_NAME ──
+
+# Client: $CLIENT_NAME
 [Peer]
 PublicKey    = $CLIENT_PUBLIC_KEY
-PresharedKey = $CLIENT_PRESHARED_KEY  # Protection forward secrecy supplémentaire
+PresharedKey = $CLIENT_PRESHARED_KEY
 AllowedIPs   = $CLIENT_IP/32
-
 EOF
 
-  # Créer le fichier .conf client
   cat > "$CLIENTS_DIR/$CLIENT_NAME.conf" << EOF
 [Interface]
-# WireGuard Client — $CLIENT_NAME
-# Généré le $(date '+%Y-%m-%d %H:%M:%S')
+# $CLIENT_NAME — $PROJECT
 PrivateKey = $CLIENT_PRIVATE_KEY
-Address    = $CLIENT_IP/24
-DNS        = 1.1.1.1, 1.0.0.1
+Address    = $CLIENT_IP/32
+DNS        = $CLIENT_DNS
 
 [Peer]
-# Serveur AWS — $PROJECT
 PublicKey    = $SERVER_PUBLIC_KEY
 PresharedKey = $CLIENT_PRESHARED_KEY
 Endpoint     = $SERVER_PUBLIC_IP:$WG_PORT
-AllowedIPs   = 0.0.0.0/0, ::/0   # Tout le trafic passe par le VPN (full tunnel)
-PersistentKeepalive = 25            # Maintient la connexion sur mobile (NAT)
+# Full tunnel: every packet, including DNS, goes through the VPN.
+AllowedIPs   = 0.0.0.0/0, ::/0
+# Keeps the session alive through mobile carrier NAT.
+PersistentKeepalive = 25
 EOF
 
-  chmod 600 "$CLIENTS_DIR/$CLIENT_NAME.conf"
-  chown ubuntu:ubuntu "$CLIENTS_DIR/$CLIENT_NAME.conf"
-
-  # Générer aussi un QR code pour import rapide sur mobile
   qrencode -t ansiutf8 < "$CLIENTS_DIR/$CLIENT_NAME.conf" \
-    > "$CLIENTS_DIR/$CLIENT_NAME-qrcode.txt" 2>/dev/null || true
+    > "$CLIENTS_DIR/$CLIENT_NAME-qrcode.txt" 2> /dev/null || true
 
-  echo "     ✅ $CLIENT_NAME → IP: $CLIENT_IP | Fichier: $CLIENT_NAME.conf"
-  CLIENT_IP_BASE=$((CLIENT_IP_BASE + 1))
+  chmod 600 "$CLIENTS_DIR/$CLIENT_NAME.conf" "$CLIENTS_DIR/$CLIENT_NAME-qrcode.txt" 2> /dev/null || true
+  echo "  Client $CLIENT_NAME -> $CLIENT_IP"
 done
+umask 022
 
 chown -R ubuntu:ubuntu "$CLIENTS_DIR"
+chmod 600 "$WG_DIR/wg0.conf"
 
-# Démarrer WireGuard
-systemctl enable wg-quick@wg0
+systemctl enable wg-quick@wg0 > /dev/null
 systemctl start wg-quick@wg0
-
-echo "✅ WireGuard démarré"
 wg show wg0
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 8. SCRIPT DE VÉRIFICATION DES VERSIONS (future-proof)
+# 7. Audit helper
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [8/9] Création du script de vérification des versions..."
+echo "[7/8] Installing the audit script..."
 
 mkdir -p "$OPT_DIR"
-
-cat > "$OPT_DIR/check-versions.sh" << 'VERSIONSCRIPT'
+cat > "$OPT_DIR/audit.sh" << 'AUDIT'
 #!/bin/bash
-# Vérifie les versions installées et les mises à jour disponibles
-echo "════════════════════════════════════════"
-echo " Audit des versions — $(date '+%Y-%m-%d %H:%M:%S')"
-echo "════════════════════════════════════════"
-echo ""
-echo "🔵 Système"
-echo "   OS      : $(lsb_release -d | cut -f2)"
-echo "   Kernel  : $(uname -r)"
-echo ""
-echo "🟢 WireGuard"
-WG_INSTALLED=$(dpkg -l wireguard-tools 2>/dev/null | awk '/wireguard-tools/{print $3}')
-WG_AVAILABLE=$(apt-cache policy wireguard-tools 2>/dev/null | grep Candidate | awk '{print $2}')
-echo "   Installé   : $WG_INSTALLED"
-echo "   Disponible : $WG_AVAILABLE"
-[ "$WG_INSTALLED" != "$WG_AVAILABLE" ] && echo "   ⚠️  MISE À JOUR DISPONIBLE" || echo "   ✅ À jour"
-echo ""
-echo "🟡 SSH"
-echo "   $(ssh -V 2>&1)"
-echo ""
-echo "🔴 Fail2ban"
-fail2ban-client status sshd 2>/dev/null || echo "   Service actif"
-echo ""
-echo "🔥 UFW"
-ufw status numbered
-echo ""
-echo "📦 Paquets avec mises à jour de sécurité disponibles :"
-apt list --upgradable 2>/dev/null | grep -i security || echo "   ✅ Aucun"
-echo ""
-echo "🔒 WireGuard Status"
+# Reports installed versions, pending security updates and runtime status.
+echo "=============================================="
+echo " Security audit — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "=============================================="
+echo
+echo "System"
+echo "  OS:     $(lsb_release -ds 2>/dev/null || echo unknown)"
+echo "  Kernel: $(uname -r)"
+echo
+echo "WireGuard"
+echo "  Installed: $(dpkg-query -W -f='$${Version}' wireguard-tools 2>/dev/null)"
+echo "  Candidate: $(apt-cache policy wireguard-tools 2>/dev/null | awk '/Candidate:/{print $2}')"
+echo
+echo "OpenSSH"
+echo "  $(ssh -V 2>&1)"
+echo "  Listening on: $(ss -tlnp 2>/dev/null | awk '/sshd|ssh/{print $4}' | paste -sd' ' -)"
+echo
+echo "Pending security updates"
+apt-get -s upgrade 2>/dev/null | awk '/^Inst.*-security/{print "  " $2 " " $3}' | sort -u
+apt-get -s upgrade 2>/dev/null | grep -q '^Inst.*-security' || echo "  none"
+echo
+echo "Firewall"
+ufw status verbose
+echo
+echo "fail2ban"
+fail2ban-client status sshd 2>/dev/null || echo "  sshd jail unavailable"
+echo
+echo "WireGuard peers"
 wg show
-VERSIONSCRIPT
+AUDIT
 
-chmod +x "$OPT_DIR/check-versions.sh"
-echo "✅ Script de vérification créé dans $OPT_DIR/check-versions.sh"
+chmod 700 "$OPT_DIR/audit.sh"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 9. MOTD PERSONNALISÉ + RÉSUMÉ FINAL
+# 8. Finish
 # ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "▶ [9/9] Finalisation..."
+echo "[8/8] Finalising..."
 
-# Message de connexion SSH personnalisé
 cat > /etc/motd << EOF
 
-╔══════════════════════════════════════════════════════╗
-║              🔒 WireGuard VPN Server                 ║
-║              Projet : $PROJECT
-╠══════════════════════════════════════════════════════╣
-║  wg show                  → Status WireGuard         ║
-║  sudo systemctl status wg-quick@wg0                  ║
-║  sudo /opt/wireguard/check-versions.sh               ║
-╚══════════════════════════════════════════════════════╝
+  WireGuard VPN server — $PROJECT
+
+  wg show                              peer and transfer status
+  sudo systemctl status wg-quick@wg0   service status
+  sudo /opt/wireguard/audit.sh         security audit
 
 EOF
 
-# Résumé final dans les logs
-echo ""
-echo "════════════════════════════════════════════════════════════"
-echo " ✅ INSTALLATION TERMINÉE — $(date '+%Y-%m-%d %H:%M:%S')"
-echo "════════════════════════════════════════════════════════════"
-echo " Serveur IP     : $SERVER_PUBLIC_IP"
-echo " Port WireGuard : $WG_PORT/UDP"
-echo " Port SSH       : $SSH_PORT/TCP"
-echo " Clients créés  : $${CLIENTS[*]}"
-echo " Configs dispo  : $CLIENTS_DIR/"
-echo "════════════════════════════════════════════════════════════"
-echo ""
-echo " Récupérer les configs depuis ton PC :"
-echo " scp ubuntu@$SERVER_PUBLIC_IP:'$CLIENTS_DIR/*.conf' ./"
-echo ""
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$DONE_MARKER"
+
+echo "=============================================="
+echo " Bootstrap complete — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo " Endpoint:  $SERVER_PUBLIC_IP:$WG_PORT (UDP)"
+echo " SSH port:  $SSH_PORT (TCP)"
+echo " Configs:   $CLIENTS_DIR"
+echo "=============================================="
