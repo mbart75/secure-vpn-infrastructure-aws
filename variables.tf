@@ -80,9 +80,16 @@ variable "ssh_port" {
 }
 
 variable "wireguard_port" {
-  description = "UDP port WireGuard listens on."
+  description = <<-EOT
+    UDP port WireGuard listens on.
+
+    WireGuard's standard port is 51820. This project defaults to 443 instead,
+    because networks that filter VPNs target the well-known port, and 443
+    carries QUIC and HTTP/3 so it is almost never blocked. Set 51820 to use
+    the standard port.
+  EOT
   type        = number
-  default     = 51820
+  default     = 443
 
   # Privileged ports are allowed: wg-quick is started by systemd as root, and
   # UDP 443 is the usual fallback when a network filters the WireGuard port.

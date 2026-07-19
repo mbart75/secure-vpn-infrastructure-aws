@@ -50,7 +50,7 @@ It is built to be ephemeral. Deploying takes one command, destroying takes one c
 ```
 Your device                          AWS region
 ┌──────────────┐                     ┌──────────────────────────────────────┐
-│  WireGuard   │   UDP 51820         │  VPC 10.20.0.0/24                    │
+│  WireGuard   │   UDP 443           │  VPC 10.20.0.0/24                    │
 │  client      │ ──────────────────► │  └── Public subnet                   │
 │              │   ChaCha20-Poly1305 │      └── EC2 t3.micro (Ubuntu 24.04) │
 └──────────────┘                     │          ├── WireGuard (in kernel)   │
@@ -61,7 +61,7 @@ Your device                          AWS region
                                      └──────────────────────────────────────┘
 
 Security group
-  UDP 51820  from 0.0.0.0/0          the tunnel is authenticated and encrypted
+  UDP 443    from 0.0.0.0/0          the tunnel is authenticated and encrypted
   TCP 22     from your IP only       auto-detected at plan time
   egress     all                     package updates and client traffic
 
@@ -181,7 +181,7 @@ Names accept letters, digits, hyphens and underscores, up to 32 characters, and 
 | `wireguard_clients` | `["phone", "laptop"]` | Devices to generate configurations for |
 | `allowed_ssh_cidr` | *auto-detected* | CIDR allowed to reach SSH; set explicitly to avoid auto-detection |
 | `ssh_port` | `22` | SSH port; the server updates sshd and its socket unit to match |
-| `wireguard_port` | `51820` | WireGuard UDP port |
+| `wireguard_port` | `443` | WireGuard UDP port; 51820 is the standard, see below |
 | `ssh_public_key_path` | `~/.ssh/id_ed25519.pub` | Public key installed on the server |
 | `vpn_network_cidr` | `10.8.0.0/24` | Address range inside the tunnel |
 | `vpc_cidr` | `10.20.0.0/24` | CIDR of the dedicated VPC |
@@ -195,17 +195,27 @@ Every variable is validated: invalid regions, malformed CIDRs, a private key pas
 
 **SSH stays on 22 on purpose.** Moving SSH to a high port is obscurity, not security: a port scan finds it in seconds. Here it would buy even less, because the security group already drops every packet from any address other than yours before it ever reaches the daemon. Access control is doing the work, not the port number. Moving it does cut noise in the auth log, and `ssh_port` is there if you want that, but be aware that restrictive networks are more likely to allow outbound 22 than an unusual port, which matters when the whole point is connecting from hotel and airport Wi-Fi.
 
-**WireGuard stays on 51820 by default, but change it if a network blocks you.** 51820 is WireGuard's registered port, which makes it an easy target for networks that filter VPNs by port: hotel, corporate and campus Wi-Fi, some public hotspots, some mobile carriers, and national-level filtering. Home ISPs rarely block it.
+**WireGuard defaults to UDP 443 here, not to its standard port.** To be clear about the deviation: WireGuard's registered port is **51820**, and that is what you will find in the upstream documentation and in most guides. This project deliberately ships 443 as the default instead.
 
-If the tunnel will not establish from a given network, redeploying on UDP 443 is usually enough:
+The reason is the use case. This is a VPN for untrusted networks, and precisely those networks are the ones that filter VPN traffic by port. Being the well-known WireGuard port makes 51820 the easy target: hotel, corporate and campus Wi-Fi, some public hotspots, some mobile carriers, and national-level filtering all block it. Home ISPs rarely do, which is the trap — you deploy from home where 51820 works perfectly, and only discover the block on arrival, when fixing it means redeploying from that same restricted network and re-importing configurations on every device.
 
-```bash
-terraform apply -var='wireguard_port=443'
+UDP 443 carries QUIC and HTTP/3, so it is almost never filtered and the traffic blends into ordinary web usage. Nothing else on this server listens on it, so the choice costs nothing.
+
+**Going back to 51820** is one variable, either in `terraform.tfvars`:
+
+```hcl
+wireguard_port = 51820
 ```
 
-UDP 443 carries QUIC and HTTP/3, so it is almost never blocked and the traffic blends into ordinary web usage. Since the whole stack is disposable, switching takes about five minutes and issues new client configurations.
+or on the command line:
 
-This defeats port-based filtering only. WireGuard's handshake has a recognisable signature, so deep packet inspection can still identify and block the protocol regardless of the port. Defeating that needs obfuscation the protocol does not provide on its own.
+```bash
+terraform apply -var='wireguard_port=51820'
+```
+
+Any port from 1 to 65535 is accepted. The security group, the server firewall and the generated client configurations all follow the value automatically.
+
+Two caveats worth stating. On a network whose acceptable use policy forbids circumventing filtering, use the standard port and respect the policy. And this defeats port-based filtering only: WireGuard's handshake has a recognisable signature, so deep packet inspection can still identify and block the protocol on any port. Defeating that needs obfuscation the protocol does not provide on its own.
 
 ---
 
