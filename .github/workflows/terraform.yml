@@ -45,14 +45,30 @@ jobs:
           shellcheck --severity=warning deploy.command cleanup-vault.command
           shellcheck --severity=error --exclude=SC1083,SC2154 scripts/user_data.sh
 
+      # Installed directly rather than through trivy-action: that action clones
+      # the Trivy repository and runs its installer, which failed on the runner
+      # while downloading the release archive. A pinned download with a checksum
+      # check has fewer moving parts and verifies what it executes.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.72.0"
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION"
+          archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "$archive" "$base/$archive"
+          curl -sSfL -o checksums.txt "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " $archive\$" checksums.txt | sha256sum -c -
+          tar -xzf "$archive" trivy
+          sudo install -m 755 trivy /usr/local/bin/trivy
+          rm -f trivy "$archive" checksums.txt
+          trivy --version
+
       - name: Scan for misconfiguration
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          scan-type: config
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          # .terraform/ holds downloaded provider schemas, not our code.
-          skip-dirs: .terraform
-          # Accepted findings are documented with their reasoning in this file.
-          trivyignores: .trivyignore
+        run: |
+          # .terraform/ holds provider schemas downloaded by the init step above,
+          # not our code. Accepted findings are documented in .trivyignore.
+          trivy config . \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --skip-dirs .terraform \
+            --ignorefile .trivyignore
