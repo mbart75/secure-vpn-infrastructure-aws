@@ -1,176 +1,267 @@
-# 🔒 Secure WireGuard VPN Infrastructure on AWS
+# Secure WireGuard VPN on AWS
 
-> **Production-grade, ephemeral VPN infrastructure** — deployed in under 5 minutes via Terraform. Built with security-first principles, OWASP Top 10 compliance, and zero persistent credentials.
+Ephemeral, hardened WireGuard VPN infrastructure defined entirely in Terraform. Deploy it before a trip, destroy it when you get back, and pay nothing while it does not exist.
 
-[![Terraform](https://img.shields.io/badge/Terraform-1.5+-purple)](https://terraform.io)
-[![AWS](https://img.shields.io/badge/AWS-eu--west--3-orange)](https://aws.amazon.com)
-[![WireGuard](https://img.shields.io/badge/WireGuard-kernel--native-green)](https://wireguard.com)
+[![Terraform](https://img.shields.io/badge/Terraform-1.5%2B-844FBA?logo=terraform&logoColor=white)](https://developer.hashicorp.com/terraform)
+[![AWS](https://img.shields.io/badge/AWS-EC2%20%7C%20VPC%20%7C%20IAM-FF9900?logo=amazonwebservices&logoColor=white)](https://aws.amazon.com)
+[![WireGuard](https://img.shields.io/badge/WireGuard-kernel%20native-88171A?logo=wireguard&logoColor=white)](https://www.wireguard.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 ---
 
-## 🎯 Project Overview
+## Contents
 
-This project provisions a **fully hardened WireGuard VPN server** on AWS EC2 (free tier) using Terraform. The infrastructure is designed to be **ephemeral** — deployed before travel on a trusted network, destroyed immediately after, leaving zero residual cost and zero persistent attack surface.
-
-### Key Design Principles
-
-- **Ephemeral by design** — destroy when not in use, redeploy in 5 minutes when needed
-- **Zero credentials on disk** — AWS keys stored exclusively in macOS Keychain (iCloud-synced) via `aws-vault`
-- **Least privilege IAM** — dedicated user scoped to specific regions and resource prefixes only
-- **Fully automated** — single double-click deployment, no manual steps
-
----
-
-## 🏗️ Architecture
-
-```
-AWS (region of choice)
-├── EC2 t3.micro (Ubuntu 24.04 LTS — free tier eligible)
-│   ├── WireGuard (kernel-native, Linux 6.x)
-│   ├── UFW firewall (strict rules + SSH rate limiting)
-│   ├── Fail2ban (24h SSH ban after 3 failed attempts)
-│   └── Unattended-upgrades (automatic security patches)
-├── Security Group
-│   ├── SSH — restricted to deployer IP only (auto-detected)
-│   └── UDP 51820 — WireGuard (open to all)
-├── Elastic IP (fixed IP for VPN duration)
-├── Key Pair (Ed25519)
-└── IAM Role (SSM access, least privilege)
-```
+- [Why this exists](#why-this-exists)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Configuring your devices](#configuring-your-devices)
+- [Configuration reference](#configuration-reference)
+- [Security controls](#security-controls)
+- [Cost](#cost)
+- [IAM setup](#iam-setup)
+- [Operating the server](#operating-the-server)
+- [Design decisions](#design-decisions)
+- [Limitations](#limitations)
+- [Project structure](#project-structure)
+- [License](#license)
 
 ---
 
-## 🔐 Security Implementation
+## Why this exists
 
-### OWASP Top 10 Compliance
+Public Wi-Fi on the road is untrusted by default, and commercial VPN providers ask you to trade one trusted third party for another. This project provisions a VPN server that **you** own, on infrastructure **you** control, from a configuration you can read end to end in about 300 lines.
 
-| OWASP Category | Control Implemented |
-|---|---|
-| **A01 — Broken Access Control** | SSH restricted to deployer IP only via Security Group; UFW rate limiting |
-| **A02 — Cryptographic Failures** | WireGuard: Curve25519 + ChaCha20-Poly1305 + BLAKE2s; SSH: Ed25519 only; EBS encrypted at rest |
-| **A05 — Security Misconfiguration** | Kernel hardening via sysctl (SYN flood, ICMP redirect, martian logging); UFW default deny |
-| **A06 — Vulnerable Components** | Unattended-upgrades for automatic security patches; version audit script |
-| **A07 — Auth Failures** | Password authentication disabled; Ed25519 keys only; Fail2ban; MaxAuthTries=3 |
-| **A08 — Software Supply Chain** | `terraform.lock.hcl` committed (SHA256 provider hashes pinned) |
-| **A10 — SSRF** | IMDSv2 enforced (hop limit=1, tokens required) — blocks SSRF attacks against metadata API |
+It is built to be ephemeral. Deploying takes one command, destroying takes one command, and nothing is left running between trips.
 
-### Credential Security
+**Design principles**
 
-```
-aws-vault → macOS Keychain (login) → iCloud Keychain sync
-```
-
-- AWS Access Keys **never stored in plaintext** (`~/.aws/credentials` unused)
-- `aws-vault` generates short-lived STS tokens for each Terraform operation
-- IAM user scoped to `wireguard-*` resources in 6 allowed regions only
-- `--no-session` mode used for programmatic access (IAM user without MFA)
-
-### Network Security
-
-```
-Client Device → WireGuard (UDP/51820, ChaCha20-Poly1305) → EC2 → Internet
-```
-
-- **Full tunnel mode** — all traffic routed through VPN (`AllowedIPs = 0.0.0.0/0, ::/0`)
-- **DNS leak prevention** — Cloudflare DNS (1.1.1.1) over the tunnel
-- **Per-client PresharedKey** — additional symmetric encryption layer per device (post-quantum hardening)
-- SSH hardened: weak algorithms disabled, PAM session only (no password auth)
+- **Ephemeral by default** — the whole stack is disposable; redeploying is faster than maintaining it
+- **No credentials on disk** — AWS keys live in the macOS Keychain via `aws-vault`, never in `~/.aws/credentials`
+- **No secrets in Terraform state** — every WireGuard private key is generated on the instance and never leaves it
+- **Self-contained networking** — a dedicated VPC, not the account's default VPC
+- **Least privilege** — a scoped IAM user for deploying, an instance role limited to Session Manager
 
 ---
 
-## 🚀 Deployment
+## Architecture
+
+```
+Your device                          AWS region
+┌──────────────┐                     ┌──────────────────────────────────────┐
+│  WireGuard   │   UDP 51820         │  VPC 10.20.0.0/24                    │
+│  client      │ ──────────────────► │  └── Public subnet                   │
+│              │   ChaCha20-Poly1305 │      └── EC2 t3.micro (Ubuntu 24.04) │
+└──────────────┘                     │          ├── WireGuard (in kernel)   │
+                                     │          ├── UFW + fail2ban          │
+                                     │          └── unattended-upgrades     │
+                                     │                                      │
+                                     │  Elastic IP ── Internet Gateway ──►  │
+                                     └──────────────────────────────────────┘
+
+Security group
+  UDP 51820  from 0.0.0.0/0          the tunnel is authenticated and encrypted
+  TCP 22     from your IP only       auto-detected at plan time
+  egress     all                     package updates and client traffic
+
+IAM
+  Instance role   AmazonSSMManagedInstanceCore   console access without SSH
+  Deploy user     scoped to one resource prefix and an allow-list of regions
+```
+
+All resources are created by Terraform, so `terraform destroy` removes all of them.
+
+---
+
+## Quick start
 
 ### Prerequisites
 
-- macOS with [Homebrew](https://brew.sh)
-- AWS account (free tier sufficient)
-- IAM user in `wireguard-deployers` group (see [IAM Setup](#iam-setup))
+- An AWS account, and an IAM user set up as described in [IAM setup](#iam-setup)
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) 1.5 or newer
+- An SSH key pair (`ssh-keygen -t ed25519` if you do not have one)
+- The [WireGuard client](https://www.wireguard.com/install/) on each device you want to connect
 
-### One-Click Deploy
-
-```bash
-# Double-click deploy.command in Finder
-# OR from terminal:
-bash deploy.command
-```
-
-The script handles automatically:
-1. Homebrew + tool installation (Terraform, AWS CLI, aws-vault, gh)
-2. AWS credential setup via aws-vault → macOS Keychain
-3. SSH key generation (Ed25519)
-4. Interactive region selection
-5. GitHub repository creation and push
-6. `terraform plan` (saved to `.bin` file) → confirmation → `terraform apply`
-7. Post-deploy instructions with exact commands
-
-### Supported Regions
-
-| # | Region | Location |
-|---|---|---|
-| 1 | `eu-west-3` | Paris 🇫🇷 |
-| 2 | `eu-south-2` | Madrid 🇪🇸 |
-| 3 | `eu-central-1` | Frankfurt 🇩🇪 |
-| 4 | `us-east-1` | Virginia 🇺🇸 |
-| 5 | `us-west-2` | Oregon 🇺🇸 |
-| 6 | `ap-southeast-1` | Singapore 🇸🇬 |
-
-### Post-Deploy
+### Option A — guided script (macOS)
 
 ```bash
-# 1. Wait 2-3 min for cloud-init to complete, then verify:
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP \
-  'sudo tail -5 /var/log/wireguard-setup.log'
-
-# 2. Retrieve client configs
-scp -i ~/.ssh/id_ed25519 \
-  ubuntu@$SERVER_IP:'~/wireguard-clients/*.conf' ~/Desktop/
-
-# 3. QR code for mobile import
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP \
-  'cat ~/wireguard-clients/telephone-qrcode.txt'
+bash deploy.command      # or double-click deploy.command in Finder
 ```
 
-### Destroy (zero residual cost)
+The script checks and updates your toolchain via Homebrew, stores your AWS keys in the macOS Keychain with `aws-vault`, asks which region and which devices you want, shows you the plan, and applies it after you confirm.
+
+It does not install Homebrew for you, does not edit your shell profile, and does not touch your Git repository.
+
+### Option B — plain Terraform (any platform)
 
 ```bash
-cd /path/to/project
-AWS_VAULT_KEYCHAIN_NAME=login \
-  aws-vault exec --no-session wireguard -- \
-  terraform destroy -auto-approve -var="aws_region=eu-west-3"
+git clone https://github.com/<your-username>/secure-vpn-infrastructure-aws.git
+cd secure-vpn-infrastructure-aws
+
+cp terraform.tfvars.example terraform.tfvars   # optional, all values have defaults
+terraform init
+terraform plan
+terraform apply
 ```
+
+Provide credentials the way you normally would: `AWS_PROFILE`, environment variables, SSO, or `aws-vault exec`.
+
+### After the apply
+
+Bootstrapping the server takes two to five minutes. Terraform prints every command you need, already filled in with your IP, port and key path:
+
+```bash
+terraform output next_steps
+```
+
+Check that the server has finished setting itself up:
+
+```bash
+eval "$(terraform output -raw ssh_command)" 'sudo test -f /var/lib/wireguard-setup.done && echo READY || echo IN_PROGRESS'
+```
+
+Then download your configuration files and import them into the WireGuard app:
+
+```bash
+$(terraform output -raw fetch_client_configs)
+```
+
+On a phone, scan the QR code instead:
+
+```bash
+$(terraform output -raw show_qr_code)
+```
+
+### Tearing it down
+
+```bash
+terraform destroy
+```
+
+This deletes everything, including the Elastic IP. Your next deployment gets a new address, so client configurations have to be re-imported. That is the intended trade-off: an allocated IPv4 address is billed by the hour even when nothing is using it.
 
 ---
 
-## ⚙️ Configuration
+## Configuring your devices
 
-### Variables
+Every entry in `wireguard_clients` produces one `.conf` file and one QR code on the server, each with its own key pair, preshared key and address inside the tunnel. There is no shared configuration between devices, so you can revoke one by removing it and reapplying.
+
+**Choose at deploy time.** The guided script asks:
+
+```
+Devices, comma separated [default: phone,laptop]: phone,laptop,tablet
+```
+
+**Or set it in `terraform.tfvars`:**
+
+```hcl
+wireguard_clients = ["phone", "laptop", "tablet", "work-laptop"]
+```
+
+**Or pass it on the command line:**
+
+```bash
+terraform apply -var='wireguard_clients=["phone","laptop","tablet"]'
+```
+
+Names accept letters, digits, hyphens and underscores, up to 32 characters, and must be unique. Addresses are allocated by Terraform from `vpn_network_cidr`, so a `/24` supports 253 devices. Adding or removing a device rewrites the server configuration, which replaces the instance and issues fresh keys for everyone.
+
+---
+
+## Configuration reference
 
 | Variable | Default | Description |
 |---|---|---|
-| `aws_region` | `eu-west-3` | AWS region (set interactively at deploy time) |
-| `project_name` | `wireguard-perso` | AWS resource name prefix |
+| `aws_region` | `eu-west-3` | Region to deploy into |
+| `project_name` | `wireguard-vpn` | Prefix for every resource name |
+| `wireguard_clients` | `["phone", "laptop"]` | Devices to generate configurations for |
+| `allowed_ssh_cidr` | *auto-detected* | CIDR allowed to reach SSH; set explicitly to avoid auto-detection |
+| `ssh_port` | `22` | SSH port; the server updates sshd and its socket unit to match |
 | `wireguard_port` | `51820` | WireGuard UDP port |
-| `ssh_port` | `22` | SSH port |
-| `wireguard_clients` | *(5 devices)* | VPN client list — one `.conf` generated per device |
-| `ssh_public_key_path` | `~/.ssh/id_ed25519.pub` | SSH public key path |
+| `ssh_public_key_path` | `~/.ssh/id_ed25519.pub` | Public key installed on the server |
+| `vpn_network_cidr` | `10.8.0.0/24` | Address range inside the tunnel |
+| `vpc_cidr` | `10.20.0.0/24` | CIDR of the dedicated VPC |
+| `client_dns_servers` | `["1.1.1.1", "1.0.0.1"]` | Resolvers pushed to clients |
+| `instance_type` | `t3.micro` | EC2 instance type |
+| `ami_id` | *latest Ubuntu 24.04* | Pin an AMI for reproducible rebuilds |
 
-### Client Devices
-
-Each client gets a unique config with its own key pair, PresharedKey, and VPN IP (`10.8.0.x/24`). Import the `.conf` into the official WireGuard app on any platform.
+Every variable is validated: invalid regions, malformed CIDRs, a private key passed where a public key is expected, or more clients than the VPN network can hold all fail at plan time with an explicit message.
 
 ---
 
-## 🔧 IAM Setup
+## Security controls
 
-### IAM Group Policy
+### Infrastructure
+
+| Control | Implementation |
+|---|---|
+| Network isolation | Dedicated VPC, subnet, route table and internet gateway; the account's default VPC is never used |
+| Ingress filtering | Security group allows only the WireGuard UDP port publicly; SSH is restricted to a single CIDR |
+| Instance metadata | IMDSv2 required, PUT hop limit of 1, instance tags not exposed via metadata |
+| Encryption at rest | EBS root volume encrypted |
+| Credentials | No static AWS credentials on the instance; the instance role grants Session Manager only |
+| Supply chain | `.terraform.lock.hcl` is committed, pinning provider versions and their checksums |
+| Local credentials | `aws-vault` keeps AWS keys in the macOS Keychain instead of a plaintext file |
+
+### Server
+
+| Control | Implementation |
+|---|---|
+| SSH authentication | Public key only; passwords and root login disabled; access limited to the `ubuntu` user |
+| SSH cryptography | Ed25519 host key only, DSA and ECDSA host keys deleted; modern KEX, ciphers and MACs only |
+| SSH configuration | Applied as a `sshd_config.d` drop-in, validated with `sshd -t` and rolled back automatically if invalid |
+| Brute force | `ufw limit` rate limiting, plus fail2ban banning for 24 hours after 3 failures in 10 minutes |
+| Firewall | UFW default-deny inbound, only the SSH and WireGuard ports opened |
+| Kernel | sysctl hardening: SYN cookies, reverse path filtering, no ICMP redirects or source routing, `kptr_restrict`, restricted ptrace, SysRq disabled |
+| Patching | `unattended-upgrades` for security updates, with automatic reboots disabled so the tunnel is never dropped without warning |
+
+### Tunnel
+
+- **Modern cryptography** — WireGuard uses Curve25519, ChaCha20-Poly1305 and BLAKE2s, with no cipher negotiation to downgrade
+- **Per-client preshared keys** — an extra symmetric layer on top of the handshake, which also hardens it against future quantum attacks on the key exchange
+- **Full tunnel** — clients route all IPv4 and IPv6 traffic through the VPN
+- **DNS** — resolvers are pushed to clients so lookups travel inside the tunnel rather than leaking to the local network
+- **Key handling** — every private key is generated on the instance by `wg genkey` and never transits Terraform, so no key material ends up in state files or CI logs
+
+### What this does not protect against
+
+Being explicit matters more than a longer feature list:
+
+- **The server sees your traffic.** A VPN moves the trust boundary to the exit node; it does not remove it. You are trusting yourself and AWS instead of a VPN vendor.
+- **Traffic is attributable to you.** A dedicated IP address used only by your devices is a stronger identifier than a shared commercial VPN pool. This is a tool for securing untrusted networks, not for anonymity.
+- **State is stored locally.** The default backend is a local state file with no locking or encryption at rest. That is appropriate for a single operator and unsuitable for a team; see [Design decisions](#design-decisions).
+- **No IPv6 ingress.** The server is reachable over IPv4 only, so clients on IPv6-only networks cannot connect.
+
+---
+
+## Cost
+
+Prices are for `eu-west-3` and exclude tax. Check the [AWS pricing pages](https://aws.amazon.com/ec2/pricing/on-demand/) for your region.
+
+| Resource | While running | Free tier |
+|---|---|---|
+| EC2 `t3.micro` | ~$0.0104/hour, ~$7.60/month | 750 hours/month for 12 months on legacy free tier accounts |
+| Public IPv4 address | $0.005/hour, ~$3.65/month | Not free. Billed since 1 February 2024 whenever allocated, including while the instance is stopped |
+| EBS gp3, 8 GB | ~$0.64/month | 30 GB/month for 12 months on legacy free tier accounts |
+| Data transfer out | ~$0.09/GB | First 100 GB/month free account-wide |
+
+**In practice:** roughly **$0.015/hour**, so about **$0.36/day** or **$2.50 for a week-long trip** on a paid account, and close to zero on an account still within the 12-month free tier apart from the IPv4 charge.
+
+Accounts created since mid-2025 use the newer credit-based free plan rather than the 12-month free tier, so the "free tier" column may not apply. Verify against your own [billing console](https://console.aws.amazon.com/billing/) rather than trusting this table.
+
+`terraform destroy` releases every billable resource, including the IPv4 address. Stopping the instance without destroying it still incurs the address and storage charges.
+
+---
+
+## IAM setup
+
+Create a dedicated IAM user for deployments rather than using your root account or an administrator. This policy limits it to the regions you actually deploy to and to resources carrying the project prefix.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "EC2FullInAllowedRegions",
+      "Sid": "EC2AndVPCInAllowedRegions",
       "Effect": "Allow",
       "Action": "ec2:*",
       "Resource": "*",
@@ -184,7 +275,23 @@ Each client gets a unique config with its own key pair, PresharedKey, and VPN IP
       }
     },
     {
-      "Sid": "IAMForWireguardRoles",
+      "Sid": "ReadCanonicalAmiParameter",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/canonical/*"
+    },
+    {
+      "Sid": "SessionManagerAccess",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:StartSession", "ssm:TerminateSession", "ssm:ResumeSession",
+        "ssm:DescribeSessions", "ssm:DescribeInstanceInformation",
+        "ssm:GetConnectionStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMForProjectRoles",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PassRole",
@@ -202,7 +309,7 @@ Each client gets a unique config with its own key pair, PresharedKey, and VPN IP
       ]
     },
     {
-      "Sid": "STSAccess",
+      "Sid": "CallerIdentity",
       "Effect": "Allow",
       "Action": ["sts:GetCallerIdentity", "sts:GetSessionToken"],
       "Resource": "*"
@@ -211,98 +318,93 @@ Each client gets a unique config with its own key pair, PresharedKey, and VPN IP
 }
 ```
 
----
+`ec2:*` is broader than ideal. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations).
 
-## 🛡️ Server Hardening Details
-
-### SSH Configuration
-
-- Protocol 2, Ed25519 host keys only (DSA/ECDSA removed)
-- Allowed ciphers: `chacha20-poly1305`, `aes256-gcm`, `aes128-gcm`
-- Allowed MACs: HMAC-SHA2-256/512 ETM, UMAC-128 ETM
-- `PasswordAuthentication no`, `PermitRootLogin no`
-- `MaxAuthTries 3`, `LoginGraceTime 30s`
-- SFTP subsystem enabled (scp support)
-
-### Kernel Hardening (sysctl)
-
-- IP forwarding enabled (required for VPN)
-- SYN flood protection (`tcp_syncookies`)
-- Reverse path filtering (anti-spoofing)
-- ICMP redirect disabled
-- Kernel pointer restriction (`kptr_restrict=2`)
-- ptrace scope restriction (`yama.ptrace_scope=1`)
-- SysRq disabled
-
-### Fail2ban
-
-- SSH: ban 24h after 3 failed attempts within 10 minutes
-- Backend: systemd journal
+The `SessionManagerAccess` statement is what makes the SSM fallback usable: if your IP changes while travelling and SSH no longer matches the security group, you can still reach the instance with `aws ssm start-session --target <instance-id>`.
 
 ---
 
-## 💸 Cost
+## Operating the server
 
-| Resource | Free Tier | After Free Tier |
-|---|---|---|
-| EC2 t3.micro | **750h/month FREE** | ~$8/month |
-| Elastic IP (attached) | **Free** | Free |
-| Outbound data | **1 GB/month free** | $0.09/GB |
+Terraform renders every command with the port and key path you configured:
 
-**→ `terraform destroy` when not in use = $0**
+```bash
+terraform output ssh_command            # open a shell
+terraform output fetch_client_configs   # download all client .conf files
+terraform output show_qr_code           # QR code for the first client
+terraform output security_audit         # run the on-server audit
+terraform output check_setup_status     # tail the bootstrap log
+```
 
-> The Elastic IP is released on destroy — the IP changes on every new deployment.
-> Re-import the `.conf` files after each redeploy.
+The audit script reports installed versions, pending security updates, listening ports, firewall state, fail2ban status and connected peers:
+
+```bash
+$(terraform output -raw security_audit)
+```
+
+Deploying to more than one region is supported through Terraform workspaces, one per region. The guided script handles this automatically; by hand:
+
+```bash
+terraform workspace select -or-create eu-west-3
+terraform apply -var='aws_region=eu-west-3'
+```
+
+Using a single workspace across regions would leave the previous region's resources running with no way to destroy them.
 
 ---
 
-## 📁 Project Structure
+## Design decisions
+
+Notes on the trade-offs, since the reasoning is more interesting than the resource list.
+
+**A dedicated VPC instead of the default VPC.** Default VPCs are routinely deleted in hardened or organization-managed accounts, and depending on one makes the stack fail with an opaque `VPCIdNotSpecified` error. A VPC, subnet, gateway and route table cost nothing and make the configuration portable to any account.
+
+**The Elastic IP is allocated before the instance.** The client configurations need the server's public address baked in. Reading it from instance metadata during boot races the address association and can embed an address that is discarded moments later, leaving clients that hand-shake against nothing. Allocating the address first, injecting it through `templatefile`, and associating it afterwards keeps the dependency graph acyclic and the result deterministic.
+
+**Private keys are generated on the instance.** Terraform could generate them with the `tls` provider, but anything Terraform generates is written to state in plaintext. Generating them on the server keeps the state file free of secrets, at the cost of retrieving configurations over SSH.
+
+**SSH hardening is a drop-in, not a rewrite.** Replacing `/etc/ssh/sshd_config` wholesale drops the `Include` directive that Ubuntu ships and makes every `openssh-server` upgrade a conffile conflict, which is a poor outcome on a box that patches itself. A file in `sshd_config.d` overrides what it needs and leaves the packaged configuration to keep receiving upstream fixes.
+
+**The SSH port change updates the systemd socket.** Ubuntu 24.04 starts sshd through socket activation, so the listening port comes from `ssh.socket` rather than from `sshd_config` alone. Changing only `sshd_config` and restarting the service leaves the listener on port 22 while the security group allows a different port, which locks the operator out. The bootstrap writes a socket override and reloads systemd.
+
+**Local state, deliberately.** A single operator deploying disposable infrastructure gains nothing from an S3 backend and a lock table that cost more to maintain than the VPN itself. For anything shared, this belongs in S3 with `use_lockfile = true` and per-region state keys, and the configuration should become a module consumed per environment.
+
+**One instance, no autoscaling, no monitoring stack.** A personal VPN that is redeployed in minutes does not need high availability. Adding it would be architecture for its own sake.
+
+---
+
+## Limitations
+
+Known gaps, in rough priority order:
+
+- **IPv4 only.** No IPv6 ingress, so clients on IPv6-only networks cannot connect.
+- **`ec2:*` in the deploy policy.** Restricted by region, not by resource. Narrowing it requires mapping each action this stack calls to its resource-level support.
+- **Local state.** No locking, no encryption at rest, no history. Fine for one operator, wrong for a team.
+- **Changing the client list replaces the instance.** Adding a device reissues keys for every device. Managing peers with `wg set` on a running server would avoid this.
+- **Automated testing is static only.** CI runs `fmt`, `validate`, `shellcheck` and a Trivy configuration scan; there is no `terraform test` suite exercising a real deployment.
+- **The guided script is macOS only.** The Terraform configuration itself is platform independent.
+
+---
+
+## Project structure
 
 ```
 .
-├── main.tf                    # EC2, SG, IAM, Key Pair, EIP resources
-├── variables.tf               # Input variables with validation
-├── outputs.tf                 # Post-deploy connection info
-├── .terraform.lock.hcl        # Provider SHA256 hashes (supply chain security)
-├── .gitignore                 # Excludes tfstate, keys, configs, credentials
-├── deploy.command             # One-click deploy script (macOS)
-├── cleanup-vault.command      # aws-vault/config cleanup utility
-├── terraform.tfvars.example   # Configuration template
-└── scripts/
-    └── user_data.sh           # EC2 cloud-init: WireGuard + hardening
+├── main.tf                     VPC, subnet, gateway, security group, IAM, EC2, Elastic IP
+├── variables.tf                Inputs, all typed, documented and validated
+├── outputs.tf                  Connection details and ready-to-run commands
+├── terraform.tfvars.example    Annotated configuration template
+├── .terraform.lock.hcl         Provider versions and checksums (committed on purpose)
+├── deploy.command              Guided deployment for macOS
+├── cleanup-vault.command       Removes the local aws-vault and ~/.aws entries
+├── scripts/
+│   └── user_data.sh            Cloud-init bootstrap: WireGuard, firewall, hardening
+└── .github/workflows/
+    └── terraform.yml           fmt, validate, shellcheck, Trivy config scan
 ```
 
 ---
 
-## 🔍 Useful Commands
+## License
 
-```bash
-# Check WireGuard status (connected peers, data transfer)
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP 'sudo wg show'
-
-# Full security audit (versions, updates, firewall status)
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP \
-  'sudo bash /opt/wireguard/check-versions.sh'
-
-# View setup logs
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP \
-  'sudo tail -50 /var/log/wireguard-setup.log'
-
-# Fail2ban banned IPs
-ssh -i ~/.ssh/id_ed25519 ubuntu@$SERVER_IP \
-  'sudo fail2ban-client status sshd'
-```
-
----
-
-## 📋 Requirements
-
-- macOS (deploy script uses Finder double-click + macOS Keychain)
-- AWS account
-- GitHub account (optional — for IaC versioning)
-
----
-
-## 📄 License
-
-MIT — see [LICENSE](LICENSE) for details.
+[MIT](LICENSE) — use it, fork it, adapt it.
