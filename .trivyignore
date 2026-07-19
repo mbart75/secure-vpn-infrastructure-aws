@@ -1,0 +1,25 @@
+# Trivy findings accepted for this project, with the reasoning.
+#
+# Both entries below are properties a VPN gateway cannot function without.
+# Silencing them here is deliberate and reviewed; it is not a blanket exclusion.
+# Everything else is expected to pass, so a new finding fails the build.
+
+# AWS-0104 — unrestricted egress from the security group.
+# A VPN server forwards its clients' traffic to arbitrary internet
+# destinations. That is the service. Restricting egress to a known set of
+# addresses would mean the tunnel could only reach that set, which defeats the
+# purpose of a full-tunnel VPN.
+AWS-0104
+
+# AWS-0164 — the subnet assigns public IP addresses on launch.
+# Clients connect to this server from the public internet, so it must be
+# publicly reachable. The exposure is controlled at the security group: a
+# single UDP port for the tunnel, which is authenticated and encrypted, and
+# SSH restricted to one address.
+AWS-0164
+
+# Not ignored, and deliberately left as a visible MEDIUM finding:
+#   AWS-0178 — VPC flow logs are not enabled.
+# Flow logs on a personal VPN would record metadata about the operator's own
+# browsing, which works against the reason for running it, and they bill per
+# ingested GB. Enable them if you need an audit trail and accept both.

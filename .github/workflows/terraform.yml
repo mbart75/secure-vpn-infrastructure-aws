@@ -24,7 +24,7 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.8"
+          terraform_version: "1.15.5"
 
       - name: Check formatting
         run: terraform fmt -check -recursive -diff
@@ -40,16 +40,19 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           # The bootstrap script is a Terraform template, so `${...}` placeholders
-          # are not shell syntax. Check the shell wrappers, and only warn on the
-          # template itself.
+          # are not shell syntax: SC1083 and SC2154 are expected there and are
+          # excluded rather than the whole file being waved through.
           shellcheck --severity=warning deploy.command cleanup-vault.command
-          shellcheck --severity=error --exclude=SC1083,SC2154 scripts/user_data.sh || true
+          shellcheck --severity=error --exclude=SC1083,SC2154 scripts/user_data.sh
 
       - name: Scan for misconfiguration
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: config
           scan-ref: .
           severity: HIGH,CRITICAL
           exit-code: "1"
-          trivy-config: ""
+          # .terraform/ holds downloaded provider schemas, not our code.
+          skip-dirs: .terraform
+          # Accepted findings are documented with their reasoning in this file.
+          trivyignores: .trivyignore
