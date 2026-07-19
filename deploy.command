@@ -1,9 +1,15 @@
 #!/bin/bash
-# ============================================================
-# WireGuard AWS — Script de déploiement complet
-# Double-clic pour lancer depuis Finder
-# Credentials AWS : aws-vault (Trousseau macOS login → iCloud)
-# ============================================================
+# ==============================================================================
+# WireGuard VPN on AWS — guided deployment (macOS)
+#
+# Double-click from Finder, or run: bash deploy.command
+#
+# This script only prepares the local toolchain and runs Terraform. It never
+# publishes code, never edits your shell profile, and never writes AWS
+# credentials to disk: they live in the macOS Keychain, managed by aws-vault.
+#
+# On Linux or Windows, follow the manual Terraform workflow in the README.
+# ==============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,211 +22,225 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Trousseau login = sync iCloud Keychain automatique
+# The login keychain syncs through iCloud Keychain, so the profile follows you
+# across Macs. Exported for this process only.
 export AWS_VAULT_KEYCHAIN_NAME="login"
-AWS_PROFILE="wireguard"
+AWS_PROFILE_NAME="wireguard"
+MIN_TERRAFORM_VERSION="1.5.0"
+
+info()    { echo -e "${GREEN}  $*${NC}"; }
+warn()    { echo -e "${YELLOW}  $*${NC}"; }
+fail()    { echo -e "${RED}  $*${NC}" >&2; exit 1; }
+heading() { echo -e "\n${BLUE}==> $*${NC}"; }
 
 echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║     WireGuard AWS — Déploiement automatisé               ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-echo ""
+echo "=============================================="
+echo "  WireGuard VPN on AWS — deployment"
+echo "=============================================="
 
-# Persister AWS_VAULT_KEYCHAIN_NAME=login dans ~/.zprofile si pas déjà là
-if ! grep -q "AWS_VAULT_KEYCHAIN_NAME" "${HOME}/.zprofile" 2>/dev/null; then
-    echo 'export AWS_VAULT_KEYCHAIN_NAME=login' >> "${HOME}/.zprofile"
-    echo -e "${GREEN}  ✓ AWS_VAULT_KEYCHAIN_NAME=login ajouté à ~/.zprofile${NC}"
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Toolchain
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[1/6] Checking the toolchain"
+
+[ -x "/opt/homebrew/bin/brew" ] && eval "$(/opt/homebrew/bin/brew shellenv)"
+[ -x "/usr/local/bin/brew" ] && eval "$(/usr/local/bin/brew shellenv)"
+
+if ! command -v brew &> /dev/null; then
+    # Deliberately not piping a remote installer into bash from a security
+    # oriented project. Install Homebrew yourself, then re-run this script.
+    fail "Homebrew is required. Install it from https://brew.sh, then run this script again."
 fi
 
-# ──────────────────────────────────────────────────────────────
-# 1. Homebrew
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [1/7] Homebrew...${NC}"
-if ! command -v brew &>/dev/null; then
-    echo "  Installation de Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    if [ -f "/opt/homebrew/bin/brew" ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "${HOME}/.zprofile"
+# Refresh formula definitions so anything installed below is the current release.
+echo "  Updating Homebrew package definitions..."
+brew update > /dev/null 2>&1 || warn "brew update failed, continuing with the local formula cache."
+
+# Installs when missing, upgrades when a newer release exists.
+ensure_tool() {
+    local command_name="$1" formula="$2" is_cask="${3:-no}"
+    local brew_args=()
+    [ "$is_cask" = "cask" ] && brew_args+=("--cask")
+
+    if ! command -v "$command_name" &> /dev/null; then
+        echo "  Installing $command_name..."
+        brew install "${brew_args[@]}" "$formula" > /dev/null
+    elif brew outdated "${brew_args[@]}" "$formula" 2> /dev/null | grep -q .; then
+        echo "  Upgrading $command_name to the latest release..."
+        brew upgrade "${brew_args[@]}" "$formula" > /dev/null || warn "Could not upgrade $command_name, continuing with the installed version."
     fi
+}
+
+brew tap hashicorp/tap > /dev/null 2>&1 || true
+ensure_tool terraform hashicorp/tap/terraform
+ensure_tool aws awscli
+# aws-vault ships as a cask; fall back to the formula name on older taps.
+ensure_tool aws-vault aws-vault cask 2> /dev/null || ensure_tool aws-vault aws-vault
+
+command -v terraform &> /dev/null || fail "terraform is not available on PATH."
+command -v aws &> /dev/null       || fail "aws CLI is not available on PATH."
+command -v aws-vault &> /dev/null || fail "aws-vault is not available on PATH."
+
+TERRAFORM_VERSION="$(terraform version -json 2> /dev/null | sed -n 's/.*"terraform_version": *"\([^"]*\)".*/\1/p' | head -1)"
+TERRAFORM_VERSION="${TERRAFORM_VERSION:-unknown}"
+
+# Numeric comparison so 1.10 is correctly treated as newer than 1.5.
+version_at_least() {
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]
+}
+if [ "$TERRAFORM_VERSION" != "unknown" ] && ! version_at_least "$TERRAFORM_VERSION" "$MIN_TERRAFORM_VERSION"; then
+    fail "Terraform $MIN_TERRAFORM_VERSION or newer is required, found $TERRAFORM_VERSION."
 fi
-# S'assurer que brew est dans le PATH (Apple Silicon)
-[ -f "/opt/homebrew/bin/brew" ] && eval "$(/opt/homebrew/bin/brew shellenv)"
-echo -e "${GREEN}  ✓ Homebrew : $(brew --version | head -1)${NC}"
-echo ""
 
-# ──────────────────────────────────────────────────────────────
-# 2. Outils
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [2/7] Outils...${NC}"
-TOOLS=()
-command -v terraform  &>/dev/null || TOOLS+=("hashicorp/tap/terraform")
-command -v aws        &>/dev/null || TOOLS+=("awscli")
-command -v aws-vault  &>/dev/null || TOOLS+=("aws-vault")
-command -v gh         &>/dev/null || TOOLS+=("gh")
-if [ ${#TOOLS[@]} -gt 0 ]; then
-    brew install "${TOOLS[@]}"
-fi
-echo -e "${GREEN}  ✓ terraform : $(terraform version -json | python3 -c 'import sys,json;print(json.load(sys.stdin)["terraform_version"])' 2>/dev/null || terraform version | head -1)${NC}"
-echo -e "${GREEN}  ✓ aws CLI   : $(aws --version 2>&1 | head -1)${NC}"
-echo -e "${GREEN}  ✓ aws-vault : $(aws-vault --version 2>&1 | head -1)${NC}"
-echo -e "${GREEN}  ✓ gh CLI    : $(gh --version | head -1)${NC}"
-echo ""
+info "terraform $TERRAFORM_VERSION"
+info "$(aws --version 2>&1 | head -1)"
+info "aws-vault $(aws-vault --version 2>&1 | head -1)"
 
-# ──────────────────────────────────────────────────────────────
-# 3. Credentials AWS (aws-vault → Trousseau login → iCloud)
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [3/7] Credentials AWS (aws-vault)...${NC}"
-echo ""
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. AWS credentials
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[2/6] AWS credentials (stored in the macOS Keychain)"
 
-# Test si le profil existe et fonctionne
-if aws-vault exec --no-session "$AWS_PROFILE" -- aws sts get-caller-identity &>/dev/null 2>&1; then
-    echo -e "${GREEN}  ✓ Profil '${AWS_PROFILE}' opérationnel (Trousseau iCloud)${NC}"
+if aws-vault exec --no-session "$AWS_PROFILE_NAME" -- aws sts get-caller-identity &> /dev/null; then
+    info "Profile '$AWS_PROFILE_NAME' is working."
 else
-    echo -e "${YELLOW}  Profil '${AWS_PROFILE}' absent ou invalide — configuration...${NC}"
+    warn "Profile '$AWS_PROFILE_NAME' is missing or invalid."
     echo ""
-    echo "  Les credentials seront stockés dans le Trousseau macOS (login)"
-    echo "  et synchronisés automatiquement sur iCloud Keychain."
+    echo "  Your access keys go straight into the macOS Keychain."
+    echo "  They are never written to ~/.aws/credentials."
     echo ""
+    aws-vault remove "$AWS_PROFILE_NAME" --force &> /dev/null || true
+    aws-vault add "$AWS_PROFILE_NAME"
 
-    # Nettoyer un éventuel profil cassé
-    aws-vault remove "$AWS_PROFILE" --force 2>/dev/null || true
-
-    echo "  Lance aws-vault add (saisis Access Key ID puis Secret Access Key) :"
-    echo ""
-    AWS_VAULT_KEYCHAIN_NAME="login" aws-vault add "$AWS_PROFILE"
-
-    echo ""
-    echo -e "${CYAN}  Vérification des credentials...${NC}"
-    if ! aws-vault exec --no-session "$AWS_PROFILE" -- aws sts get-caller-identity &>/dev/null 2>&1; then
-        echo -e "${RED}  ✗ Credentials invalides — vérifie Access Key ID et Secret Key${NC}"
-        aws-vault remove "$AWS_PROFILE" --force 2>/dev/null || true
-        exit 1
+    if ! aws-vault exec --no-session "$AWS_PROFILE_NAME" -- aws sts get-caller-identity &> /dev/null; then
+        aws-vault remove "$AWS_PROFILE_NAME" --force &> /dev/null || true
+        fail "Those credentials were rejected by AWS. Check the access key and secret, then retry."
     fi
-
-    echo -e "${GREEN}  ✓ Credentials enregistrés dans le Trousseau macOS (login/iCloud)${NC}"
+    info "Credentials stored."
 fi
 
-AWS_ACCOUNT=$(aws-vault exec --no-session "$AWS_PROFILE" -- aws sts get-caller-identity --query Account --output text)
-echo -e "${GREEN}  ✓ Compte AWS : ${AWS_ACCOUNT}${NC}"
-echo ""
+AWS_ACCOUNT_ID="$(aws-vault exec --no-session "$AWS_PROFILE_NAME" -- aws sts get-caller-identity --query Account --output text)"
+info "AWS account: $AWS_ACCOUNT_ID"
 
-# ──────────────────────────────────────────────────────────────
-# 4. Clé SSH
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [4/7] Clé SSH...${NC}"
-if [ ! -f "${HOME}/.ssh/id_ed25519.pub" ]; then
-    mkdir -p "${HOME}/.ssh" && chmod 700 "${HOME}/.ssh"
-    ssh-keygen -t ed25519 -C "wireguard-aws" -f "${HOME}/.ssh/id_ed25519" -N ""
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. SSH key
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[3/6] SSH key"
+
+SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
+if [ ! -f "$SSH_KEY_PATH.pub" ]; then
+    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+    ssh-keygen -t ed25519 -C "wireguard-aws" -f "$SSH_KEY_PATH" -N ""
+    info "Generated a new Ed25519 key."
 fi
-echo -e "${GREEN}  ✓ Clé SSH : ${HOME}/.ssh/id_ed25519.pub${NC}"
-echo ""
+info "Using $SSH_KEY_PATH.pub"
 
-# ──────────────────────────────────────────────────────────────
-# 5. Région AWS
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [5/7] Région AWS...${NC}"
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Region
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[4/6] Region"
+
 echo ""
-echo -e "${CYAN}  Quelle région ?${NC}"
-echo "    1) eu-west-3      — Paris 🇫🇷"
-echo "    2) eu-south-2     — Madrid 🇪🇸"
-echo "    3) eu-central-1   — Francfort 🇩🇪"
-echo "    4) us-east-1      — Virginie 🇺🇸"
-echo "    5) us-west-2      — Oregon 🇺🇸"
-echo "    6) ap-southeast-1 — Singapour 🇸🇬"
-echo "    7) Autre"
+echo "    1) eu-west-3       Paris"
+echo "    2) eu-central-1    Frankfurt"
+echo "    3) eu-south-2      Madrid"
+echo "    4) us-east-1       N. Virginia"
+echo "    5) us-west-2       Oregon"
+echo "    6) ap-southeast-1  Singapore"
+echo "    7) something else"
 echo ""
-read -rp "  Choix [1-7, défaut=1] : " REGION_CHOICE
+read -rp "  Choice [1-7, default 1]: " REGION_CHOICE
 
 case "${REGION_CHOICE:-1}" in
-    1) AWS_REGION="eu-west-3" ;;
-    2) AWS_REGION="eu-south-2" ;;
-    3) AWS_REGION="eu-central-1" ;;
-    4) AWS_REGION="us-east-1" ;;
-    5) AWS_REGION="us-west-2" ;;
-    6) AWS_REGION="ap-southeast-1" ;;
-    7) read -rp "  Région : " AWS_REGION ;;
-    *) AWS_REGION="eu-west-3" ;;
+    1|"") AWS_REGION="eu-west-3" ;;
+    2)    AWS_REGION="eu-central-1" ;;
+    3)    AWS_REGION="eu-south-2" ;;
+    4)    AWS_REGION="us-east-1" ;;
+    5)    AWS_REGION="us-west-2" ;;
+    6)    AWS_REGION="ap-southeast-1" ;;
+    7)    read -rp "  Region: " AWS_REGION ;;
+    *)    AWS_REGION="eu-west-3" ;;
 esac
-echo -e "${GREEN}  ✓ Région : ${AWS_REGION}${NC}"
-echo ""
 
-# ──────────────────────────────────────────────────────────────
-# 6. GitHub
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [6/7] GitHub...${NC}"
-REPO_NAME="wireguard-aws-vpn"
+[[ "$AWS_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || fail "'$AWS_REGION' is not a valid AWS region identifier."
+info "Region: $AWS_REGION"
 
-[ ! -d ".git" ] && git init && git branch -M main
-
-if command -v gh &>/dev/null; then
-    if ! gh auth status &>/dev/null; then
-        echo "  Authentification GitHub..."
-        gh auth login
-    fi
-    GH_USER=$(gh api user --jq .login)
-    if ! gh repo view "${GH_USER}/${REPO_NAME}" &>/dev/null 2>&1; then
-        gh repo create "$REPO_NAME" --private \
-            --description "WireGuard VPN sécurisé sur AWS — Terraform" --clone=false
-        git remote add origin "https://github.com/${GH_USER}/${REPO_NAME}.git" 2>/dev/null || true
-        echo -e "${GREEN}  ✓ Repo créé : https://github.com/${GH_USER}/${REPO_NAME}${NC}"
-    else
-        git remote get-url origin &>/dev/null || \
-            git remote add origin "https://github.com/${GH_USER}/${REPO_NAME}.git"
-        echo -e "${GREEN}  ✓ Repo existant${NC}"
-    fi
-    git add .
-    git diff --cached --quiet 2>/dev/null && git rev-parse HEAD &>/dev/null || \
-        git commit -m "feat: WireGuard AWS VPN — secure Terraform deployment" 2>/dev/null || true
-    git push -u origin main 2>/dev/null || true
-    echo -e "${GREEN}  ✓ Code poussé sur GitHub${NC}"
-fi
-echo ""
-
-# ──────────────────────────────────────────────────────────────
-# 7. Terraform (via aws-vault)
-# ──────────────────────────────────────────────────────────────
-echo -e "${BLUE}▶ [7/7] Déploiement Terraform (${AWS_REGION})...${NC}"
-echo ""
-
-aws-vault exec --no-session "$AWS_PROFILE" -- terraform init -upgrade
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. VPN clients
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[5/6] Devices to connect"
 
 echo ""
-echo -e "${CYAN}  Plan :${NC}"
-aws-vault exec --no-session "$AWS_PROFILE" -- terraform plan \
-  -var="aws_region=${AWS_REGION}" \
-  -out="tfplan-${AWS_REGION}.bin"
+echo "  One configuration file and one QR code is generated per device,"
+echo "  each with its own keys. Names may contain letters, digits,"
+echo "  hyphens and underscores."
+echo ""
+read -rp "  Devices, comma separated [default: phone,laptop]: " CLIENTS_INPUT
+CLIENTS_INPUT="${CLIENTS_INPUT:-phone,laptop}"
+
+# Build an HCL list literal for -var, validating each name on the way.
+CLIENTS_HCL="["
+CLIENT_COUNT=0
+IFS=',' read -ra RAW_CLIENTS <<< "$CLIENTS_INPUT"
+for RAW_NAME in "${RAW_CLIENTS[@]}"; do
+    NAME="$(echo "$RAW_NAME" | tr -d '[:space:]')"
+    [ -z "$NAME" ] && continue
+    [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] || fail "Invalid device name '$NAME'. Use letters, digits, hyphens or underscores (max 32 characters)."
+    [ "$CLIENT_COUNT" -gt 0 ] && CLIENTS_HCL+=","
+    CLIENTS_HCL+="\"$NAME\""
+    CLIENT_COUNT=$((CLIENT_COUNT + 1))
+done
+CLIENTS_HCL+="]"
+[ "$CLIENT_COUNT" -eq 0 ] && fail "At least one device is required."
+info "$CLIENT_COUNT device(s): $CLIENTS_HCL"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. Terraform
+# ──────────────────────────────────────────────────────────────────────────────
+heading "[6/6] Deploying to $AWS_REGION"
+
+run_terraform() {
+    aws-vault exec --no-session "$AWS_PROFILE_NAME" -- terraform "$@"
+}
+
+# Plain init, not "init -upgrade": the committed .terraform.lock.hcl pins the
+# provider versions and their checksums. Upgrade providers deliberately, in a
+# separate change, with: terraform init -upgrade
+run_terraform init -input=false
+
+# One workspace per region. Without this, a single local state file is reused
+# across regions and switching region silently orphans the previous region's
+# instance and Elastic IP, which keep billing with no way to destroy them.
+run_terraform workspace select -or-create "$AWS_REGION" > /dev/null
+info "Terraform workspace: $AWS_REGION"
+
+PLAN_FILE="tfplan-${AWS_REGION}.bin"
+echo ""
+run_terraform plan -input=false \
+    -var="aws_region=$AWS_REGION" \
+    -var="wireguard_clients=$CLIENTS_HCL" \
+    -out="$PLAN_FILE"
 
 echo ""
-echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
-echo -e "${YELLOW}  Déployer en région ${AWS_REGION} ? (yes/no)              ${NC}"
-echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}=============================================="
+echo -e "  Deploy to $AWS_REGION? Type 'yes' to confirm."
+echo -e "==============================================${NC}"
 read -r CONFIRM
-[ "$CONFIRM" != "yes" ] && echo "Annulé." && rm -f "tfplan-${AWS_REGION}.bin" && exit 0
+if [ "$CONFIRM" != "yes" ]; then
+    rm -f "$PLAN_FILE"
+    echo "Cancelled. Nothing was created."
+    exit 0
+fi
 
-aws-vault exec --no-session "$AWS_PROFILE" -- terraform apply "tfplan-${AWS_REGION}.bin"
-rm -f "tfplan-${AWS_REGION}.bin"
+# Applying the reviewed plan artifact, not re-planning at apply time.
+run_terraform apply -input=false "$PLAN_FILE"
+rm -f "$PLAN_FILE"
 
-SERVER_IP=$(aws-vault exec --no-session "$AWS_PROFILE" -- terraform output -raw server_public_ip 2>/dev/null || echo "<IP>")
-
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  ✅ DÉPLOIEMENT TERMINÉ — ${AWS_REGION}${NC}"
-echo -e "${GREEN}║  🌐 IP publique : ${SERVER_IP}${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+run_terraform output -raw next_steps
 echo ""
-echo -e "${YELLOW}  ⏳ Attends 2-3 min que WireGuard finisse l'installation${NC}"
-echo -e "${YELLOW}     puis vérifie avec :${NC}"
-echo ""
-echo -e "${CYAN}  # 1. Vérifier que l'installation est terminée${NC}"
-echo "  ssh -i ~/.ssh/id_ed25519 ubuntu@${SERVER_IP} 'sudo tail -5 /var/log/wireguard-setup.log'"
-echo ""
-echo -e "${CYAN}  # 2. Récupérer les configs WireGuard sur le Desktop${NC}"
-echo "  scp -i ~/.ssh/id_ed25519 ubuntu@${SERVER_IP}:'~/wireguard-clients/*.conf' ~/Desktop/"
-echo ""
-echo -e "${CYAN}  # 3. QR code pour import rapide sur téléphone${NC}"
-echo "  ssh -i ~/.ssh/id_ed25519 ubuntu@${SERVER_IP} 'cat ~/wireguard-clients/telephone-qrcode.txt'"
-echo ""
-echo -e "${RED}  🗑  Pour détruire (fin de voyage) :${NC}"
-echo "  cd '${SCRIPT_DIR}' && AWS_VAULT_KEYCHAIN_NAME=login aws-vault exec --no-session ${AWS_PROFILE} -- terraform destroy -auto-approve -var=\"aws_region=${AWS_REGION}\""
+echo -e "${CYAN}  To destroy everything later:${NC}"
+echo "    cd '$SCRIPT_DIR'"
+echo "    aws-vault exec --no-session $AWS_PROFILE_NAME -- terraform workspace select $AWS_REGION"
+echo "    aws-vault exec --no-session $AWS_PROFILE_NAME -- terraform destroy -var='aws_region=$AWS_REGION' -var='wireguard_clients=$CLIENTS_HCL'"
 echo ""
