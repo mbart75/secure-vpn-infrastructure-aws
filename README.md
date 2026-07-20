@@ -325,22 +325,42 @@ Create a dedicated IAM user for deployments rather than using your root account 
       "Resource": "*"
     },
     {
-      "Sid": "IAMForProjectRoles",
+      "Sid": "ManageProjectRoles",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PassRole",
-        "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole",
+        "iam:DetachRolePolicy",
         "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
         "iam:GetInstanceProfile", "iam:AddRoleToInstanceProfile",
         "iam:RemoveRoleFromInstanceProfile", "iam:ListInstanceProfilesForRole",
         "iam:TagRole", "iam:UntagRole", "iam:TagInstanceProfile",
-        "iam:UntagInstanceProfile", "iam:UpdateRole",
+        "iam:UntagInstanceProfile",
         "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"
       ],
       "Resource": [
         "arn:aws:iam::*:role/wireguard-*",
         "arn:aws:iam::*:instance-profile/wireguard-*"
       ]
+    },
+    {
+      "Sid": "AttachOnlySsmCoreToProjectRoles",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::*:role/wireguard-*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        }
+      }
+    },
+    {
+      "Sid": "PassProjectRoleToEc2Only",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/wireguard-*",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" }
+      }
     },
     {
       "Sid": "CallerIdentity",
@@ -352,7 +372,13 @@ Create a dedicated IAM user for deployments rather than using your root account 
 }
 ```
 
-`ec2:*` is broader than ideal. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations).
+**Why `iam:AttachRolePolicy` sits in its own statement.** Grouping it with the other IAM actions and scoping it with `"Resource": "arn:aws:iam::*:role/wireguard-*"` looks locked down, but it is not. For that action, `Resource` names the role being modified — the target. It says nothing about *which policy* gets attached to it. Without a condition on `iam:PolicyARN`, the answer is: any policy, including `AdministratorAccess`.
+
+That turns the deploy key into a full privilege-escalation chain. Create a role named `wireguard-anything` (`CreateRole` allows it — the prefix is chosen by the caller, so it protects nothing), attach `AdministratorAccess` to it, wrap it in an instance profile, pass it to an EC2 instance (`PassRole` + `ec2:*`), then read the role's credentials from IMDS. Five steps, none of them exploiting a bug: every one is explicitly granted by the policy.
+
+The `ArnEquals` condition on `iam:PolicyARN` restricts attachment to `AmazonSSMManagedInstanceCore`, the only policy this stack actually needs, which breaks step two. The `iam:PassedToService` condition on `PassRole` adds a second bound: project roles can only be handed to EC2, not to Lambda or any other service.
+
+`ec2:*` is broader than ideal. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can still create EC2 resources in the six allowed regions — but can no longer grant itself administrator access to the account.
 
 The `SessionManagerAccess` statement is what makes the SSM fallback usable: if your IP changes while travelling and SSH no longer matches the security group, you can still reach the instance with `aws ssm start-session --target <instance-id>`.
 
