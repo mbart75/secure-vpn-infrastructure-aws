@@ -149,19 +149,23 @@ else
 fi
 
 # Ubuntu 24.04 starts sshd through socket activation. The listening port comes
-# from ssh.socket, which is generated from sshd_config at daemon-reload time, so
-# "systemctl restart ssh" alone would leave the listener on port 22 and lock the
-# operator out whenever ssh_port is customised.
+# from ssh.socket, not from sshd_config, so "systemctl restart ssh" alone would
+# leave the listener on port 22 and lock the operator out on a custom port.
+#
+# Bind the socket to 0.0.0.0 explicitly. A bare "ListenStream=<port>" binds the
+# IPv6 wildcard [::] only, which does not serve IPv4 clients while sshd runs with
+# AddressFamily inet (IPv4 only) — the connection is refused. 0.0.0.0 matches the
+# daemon's address family and is all we need, since there is no IPv6 ingress.
 if systemctl list-unit-files ssh.socket &> /dev/null && systemctl is-enabled ssh.socket &> /dev/null; then
   mkdir -p /etc/systemd/system/ssh.socket.d
   cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
 [Socket]
 ListenStream=
-ListenStream=$SSH_PORT
+ListenStream=0.0.0.0:$SSH_PORT
 EOF
   systemctl daemon-reload
   systemctl restart ssh.socket
-  echo "  ssh.socket now listening on port $SSH_PORT."
+  echo "  ssh.socket now listening on 0.0.0.0:$SSH_PORT."
 else
   systemctl daemon-reload
   systemctl restart ssh
