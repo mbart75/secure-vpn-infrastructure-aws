@@ -27,11 +27,31 @@ provider "aws" {
 
 # ─── Data sources ─────────────────────────────────────────────────────────────
 
-# Canonical publishes the current Ubuntu 24.04 LTS AMI id per region as a public
-# SSM parameter. More stable than matching AMI names with a glob, which breaks
-# whenever Canonical adjusts its naming scheme.
-data "aws_ssm_parameter" "ubuntu" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+# Latest Ubuntu 24.04 LTS image published by Canonical.
+#
+# Canonical also exposes this as a public SSM parameter, which is immune to
+# naming changes, but reading it requires an extra ssm:GetParameter grant in the
+# deployer policy. Describing images needs no permission beyond the ec2 access
+# this stack already requires, so the lookup stays here and the setup stays
+# shorter. Pin var.ami_id when you need a byte-for-byte reproducible rebuild.
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
 }
 
 # Not every availability zone offers every instance type.
@@ -52,7 +72,7 @@ data "http" "my_ip" {
 }
 
 locals {
-  ami_id = coalesce(var.ami_id, nonsensitive(data.aws_ssm_parameter.ubuntu.value))
+  ami_id = coalesce(var.ami_id, data.aws_ami.ubuntu.id)
 
   # null when the instance type is offered in no zone of this region; the
   # subnet turns that into an actionable error rather than an index failure.

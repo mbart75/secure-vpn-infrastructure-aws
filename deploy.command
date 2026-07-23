@@ -57,25 +57,25 @@ echo "  Updating Homebrew package definitions..."
 brew update > /dev/null 2>&1 || warn "brew update failed, continuing with the local formula cache."
 
 # Installs when missing, upgrades when a newer release exists.
+# No arrays here: macOS runs .command files with bash 3.2, where expanding an
+# empty array under `set -u` aborts with "unbound variable". brew resolves
+# casks and formulae from the name alone, so no extra flag is needed either.
 ensure_tool() {
-    local command_name="$1" formula="$2" is_cask="${3:-no}"
-    local brew_args=()
-    [ "$is_cask" = "cask" ] && brew_args+=("--cask")
+    local command_name="$1" formula="$2"
 
     if ! command -v "$command_name" &> /dev/null; then
         echo "  Installing $command_name..."
-        brew install "${brew_args[@]}" "$formula" > /dev/null
-    elif brew outdated "${brew_args[@]}" "$formula" 2> /dev/null | grep -q .; then
+        brew install "$formula" > /dev/null || fail "Could not install $command_name."
+    elif brew outdated "$formula" 2> /dev/null | grep -q .; then
         echo "  Upgrading $command_name to the latest release..."
-        brew upgrade "${brew_args[@]}" "$formula" > /dev/null || warn "Could not upgrade $command_name, continuing with the installed version."
+        brew upgrade "$formula" > /dev/null 2>&1 || warn "Could not upgrade $command_name, continuing with the installed version."
     fi
 }
 
 brew tap hashicorp/tap > /dev/null 2>&1 || true
 ensure_tool terraform hashicorp/tap/terraform
 ensure_tool aws awscli
-# aws-vault ships as a cask; fall back to the formula name on older taps.
-ensure_tool aws-vault aws-vault cask 2> /dev/null || ensure_tool aws-vault aws-vault
+ensure_tool aws-vault aws-vault
 
 command -v terraform &> /dev/null || fail "terraform is not available on PATH."
 command -v aws &> /dev/null       || fail "aws CLI is not available on PATH."
@@ -179,10 +179,19 @@ read -rp "  Devices, comma separated [default: phone,laptop]: " CLIENTS_INPUT
 CLIENTS_INPUT="${CLIENTS_INPUT:-phone,laptop}"
 
 # Build an HCL list literal for -var, validating each name on the way.
+# Split with parameter expansion rather than an array: bash 3.2 aborts on an
+# empty array under `set -u`, and unquoted word splitting would glob the names.
 CLIENTS_HCL="["
 CLIENT_COUNT=0
-IFS=',' read -ra RAW_CLIENTS <<< "$CLIENTS_INPUT"
-for RAW_NAME in "${RAW_CLIENTS[@]}"; do
+REMAINING="$CLIENTS_INPUT"
+while [ -n "$REMAINING" ]; do
+    RAW_NAME="${REMAINING%%,*}"
+    if [ "$RAW_NAME" = "$REMAINING" ]; then
+        REMAINING=""
+    else
+        REMAINING="${REMAINING#*,}"
+    fi
+
     NAME="$(echo "$RAW_NAME" | tr -d '[:space:]')"
     [ -z "$NAME" ] && continue
     [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]] || fail "Invalid device name '$NAME'. Use letters, digits, hyphens or underscores (max 32 characters)."

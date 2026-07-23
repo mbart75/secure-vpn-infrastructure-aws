@@ -309,12 +309,6 @@ Create a dedicated IAM user for deployments rather than using your root account 
       }
     },
     {
-      "Sid": "ReadCanonicalAmiParameter",
-      "Effect": "Allow",
-      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
-      "Resource": "arn:aws:ssm:*::parameter/aws/service/canonical/*"
-    },
-    {
       "Sid": "SessionManagerAccess",
       "Effect": "Allow",
       "Action": [
