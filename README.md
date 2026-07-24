@@ -239,7 +239,7 @@ Two caveats worth stating. On a network whose acceptable use policy forbids circ
 | Control | Implementation |
 |---|---|
 | SSH authentication | Public key only; passwords and root login disabled; access limited to the `ubuntu` user |
-| SSH cryptography | Ed25519 host key only, DSA and ECDSA host keys deleted; modern KEX, ciphers and MACs only |
+| SSH cryptography | Ed25519 host key only, DSA and ECDSA host keys deleted; modern ciphers and MACs; **hybrid post-quantum key exchange** when the installed OpenSSH offers one |
 | SSH configuration | Applied as a `sshd_config.d` drop-in, validated with `sshd -t` and rolled back automatically if invalid |
 | Brute force | `ufw limit` rate limiting, plus fail2ban banning for 24 hours after 3 failures in 10 minutes |
 | Firewall | UFW default-deny inbound, only the SSH and WireGuard ports opened |
@@ -249,7 +249,8 @@ Two caveats worth stating. On a network whose acceptable use policy forbids circ
 ### Tunnel
 
 - **Modern cryptography** — WireGuard uses Curve25519, ChaCha20-Poly1305 and BLAKE2s, with no cipher negotiation to downgrade
-- **Per-client preshared keys** — an extra symmetric layer on top of the handshake, which also hardens it against future quantum attacks on the key exchange
+- **Per-client preshared keys** — an extra symmetric layer on top of the handshake, which also hardens the tunnel against future quantum attacks on the key exchange
+- **Post-quantum SSH key exchange** — the admin channel is covered too, see below
 - **Full tunnel** — clients route all IPv4 and IPv6 traffic through the VPN
 - **DNS** — resolvers are pushed to clients so lookups travel inside the tunnel rather than leaking to the local network
 - **Key handling** — every private key is generated on the instance by `wg genkey` and never transits Terraform, so no key material ends up in state files or CI logs
@@ -418,6 +419,8 @@ Notes on the trade-offs, since the reasoning is more interesting than the resour
 **The Elastic IP is allocated before the instance.** The client configurations need the server's public address baked in. Reading it from instance metadata during boot races the address association and can embed an address that is discarded moments later, leaving clients that hand-shake against nothing. Allocating the address first, injecting it through `templatefile`, and associating it afterwards keeps the dependency graph acyclic and the result deterministic.
 
 **Private keys are generated on the instance.** Terraform could generate them with the `tls` provider, but anything Terraform generates is written to state in plaintext. Generating them on the server keeps the state file free of secrets, at the cost of retrieving configurations over SSH.
+
+**The SSH key exchange list is detected, not hardcoded.** A pinned `KexAlgorithms` list freezes cryptography at the date it was written and eventually becomes weaker than the upstream default — recent OpenSSH clients now warn that such a session is open to *store now, decrypt later*, where an adversary records traffic today and decrypts it once a quantum computer can break the classical exchange. Hybrid exchanges combine a classical and a lattice-based secret so both must fall. The list is therefore built from what `ssh -Q KexAlgorithms` reports on the instance: `mlkem768x25519-sha256` when present, `sntrup761x25519-sha512@openssh.com` otherwise. Hardcoding the former would break sshd on Ubuntu 24.04, whose OpenSSH 9.6 only gained it in 9.9, and lock the operator out; detecting it means the stronger algorithm is adopted on its own as unattended-upgrades moves OpenSSH forward.
 
 **SSH hardening is a drop-in, not a rewrite.** Replacing `/etc/ssh/sshd_config` wholesale drops the `Include` directive that Ubuntu ships and makes every `openssh-server` upgrade a conffile conflict, which is a poor outcome on a box that patches itself. A file in `sshd_config.d` overrides what it needs and leaves the packaged configuration to keep receiving upstream fixes.
 
