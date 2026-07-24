@@ -98,6 +98,35 @@ echo "[2/8] Hardening SSH..."
 # raise a conffile conflict. Directives are first-match-wins, and the 00- prefix
 # makes this file win over cloud-init's own drop-in.
 mkdir -p /etc/ssh/sshd_config.d
+
+# A hardcoded algorithm list freezes the cryptography at the date it was
+# written, and eventually becomes WEAKER than the upstream default. Recent
+# OpenSSH clients now warn about "store now, decrypt later": an adversary
+# records the encrypted session today and decrypts it once a quantum computer
+# can break the classical key exchange. Hybrid post-quantum exchanges combine a
+# classical and a lattice-based secret, so both must fall for the session key
+# to leak.
+#
+# The list is built from what the installed binary actually supports.
+# Hardcoding mlkem768x25519-sha256 would break sshd on Ubuntu 24.04, whose
+# OpenSSH 9.6 only gained it in 9.9 — sshd would refuse to start and lock the
+# operator out. As unattended-upgrades moves OpenSSH forward, the stronger
+# algorithm is picked up on its own.
+PQ_KEX=""
+for ALG in mlkem768x25519-sha256 sntrup761x25519-sha512@openssh.com sntrup761x25519-sha512; do
+  if ssh -Q KexAlgorithms 2> /dev/null | grep -qx "$ALG"; then
+    PQ_KEX="$PQ_KEX$ALG,"
+  fi
+done
+
+KEX_ALGORITHMS="$${PQ_KEX}curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"
+
+if [ -n "$PQ_KEX" ]; then
+  echo "  Post-quantum key exchange enabled: $${PQ_KEX%,}"
+else
+  echo "  No post-quantum key exchange available in this OpenSSH build."
+fi
+
 cat > /etc/ssh/sshd_config.d/00-hardening.conf << EOF
 Port $SSH_PORT
 AddressFamily inet
@@ -105,8 +134,8 @@ AddressFamily inet
 # Offer only the Ed25519 host key.
 HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
-# Modern key exchange, ciphers and MACs only.
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+# Modern key exchange, ciphers and MACs only, post-quantum first when available.
+KexAlgorithms $KEX_ALGORITHMS
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com
 
