@@ -115,6 +115,10 @@ resource "aws_internet_gateway" "wireguard" {
   }
 }
 
+# The temporary public address assigned at launch gives cloud-init outbound
+# access before Terraform can associate the EIP. Removing it without moving the
+# EIP to a pre-created ENI races apt and can leave the bootstrap half-complete.
+#trivy:ignore:AWS-0164
 resource "aws_subnet" "wireguard" {
   vpc_id                  = aws_vpc.wireguard.id
   cidr_block              = var.vpc_cidr
@@ -239,6 +243,9 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   }
 }
 
+# A full-tunnel VPN must forward client traffic to arbitrary internet
+# destinations. Restricting this rule would turn it into a destination allowlist.
+#trivy:ignore:AWS-0104
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.wireguard.id
   description       = "Outbound traffic: package updates and client tunnel egress"

@@ -43,6 +43,8 @@ id_*_key
 *_ed25519
 
 # ── Notes de session locales — jamais publiées ────────────────────────────────
+.claude/
+graphify-out/
 Transmission.md
 transmissions/
 
