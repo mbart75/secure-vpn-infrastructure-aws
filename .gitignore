@@ -45,6 +45,8 @@ id_*_key
 # ── Notes de session locales — jamais publiées ────────────────────────────────
 .claude/
 graphify-out/
+__pycache__/
+*.pyc
 Transmission.md
 transmissions/
 

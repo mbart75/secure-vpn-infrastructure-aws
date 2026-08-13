@@ -10,7 +10,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class RepositoryHygieneTest(unittest.TestCase):
     def test_agent_and_graph_artifacts_are_ignored(self):
-        for candidate in (".claude/session.md", "graphify-out/graph.json"):
+        for candidate in (
+            ".claude/session.md",
+            "graphify-out/graph.json",
+            "tests/__pycache__/test_security.cpython-315.pyc",
+        ):
             result = subprocess.run(
                 ["git", "check-ignore", "--quiet", candidate],
                 cwd=REPO_ROOT,
