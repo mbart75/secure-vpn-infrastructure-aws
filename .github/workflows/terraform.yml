@@ -66,7 +66,8 @@ jobs:
       - name: Scan for misconfiguration
         run: |
           # .terraform/ holds provider schemas downloaded by the init step above,
-          # not our code. Accepted findings are documented in .trivyignore.
+          # not our code. Accepted findings are documented inline on the exact
+          # Terraform resources they concern.
           trivy config . \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
