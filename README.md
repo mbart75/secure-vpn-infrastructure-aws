@@ -40,7 +40,7 @@ It is built to be ephemeral. Deploying takes one command, destroying takes one c
 - **No credentials on disk** — AWS keys live in the macOS Keychain via `aws-vault`, never in `~/.aws/credentials`
 - **No secrets in Terraform state** — every WireGuard private key is generated on the instance and never leaves it
 - **Self-contained networking** — a dedicated VPC, not the account's default VPC
-- **Least privilege** — a scoped IAM user for deploying, an instance role limited to Session Manager
+- **Bounded deployment identity** — project-scoped IAM and Session Manager access, region-scoped EC2 access, with the remaining EC2 breadth documented
 
 ---
 
@@ -67,7 +67,7 @@ Security group
 
 IAM
   Instance role   AmazonSSMManagedInstanceCore   console access without SSH
-  Deploy user     scoped to one resource prefix and an allow-list of regions
+  Deploy user     project-scoped IAM/SSM; EC2 scoped to an allow-list of regions
 ```
 
 All resources are created by Terraform, so `terraform destroy` removes all of them.
@@ -289,7 +289,7 @@ Accounts created since mid-2025 use the newer credit-based free plan rather than
 <a id="iam-setup"></a>
 ## 🔧 IAM setup
 
-Create a dedicated IAM user for deployments rather than using your root account or an administrator. This policy limits it to the regions you actually deploy to and to resources carrying the project prefix.
+Create a dedicated IAM user for deployments rather than using your root account or an administrator. This policy limits IAM and Session Manager access to the VPN project and limits EC2 access to the regions you actually deploy to. The EC2 statement remains intentionally broad within those regions; that trade-off is documented below.
 
 ```json
 {
@@ -310,14 +310,36 @@ Create a dedicated IAM user for deployments rather than using your root account 
       }
     },
     {
-      "Sid": "SessionManagerAccess",
+      "Sid": "SessionManagerDiscovery",
       "Effect": "Allow",
       "Action": [
-        "ssm:StartSession", "ssm:TerminateSession", "ssm:ResumeSession",
         "ssm:DescribeSessions", "ssm:DescribeInstanceInformation",
         "ssm:GetConnectionStatus"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "StartSessionOnProjectInstances",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/Project": "wireguard-vpn"
+        }
+      }
+    },
+    {
+      "Sid": "StartDefaultSessionDocument",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell"
+    },
+    {
+      "Sid": "ControlOwnSessions",
+      "Effect": "Allow",
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+      "Resource": "arn:aws:ssm:*:*:session/${aws:userid}-*"
     },
     {
       "Sid": "ManageProjectRoles",
@@ -373,9 +395,9 @@ That turns the deploy key into a full privilege-escalation chain. Create a role 
 
 The `ArnEquals` condition on `iam:PolicyARN` restricts attachment to `AmazonSSMManagedInstanceCore`, the only policy this stack actually needs, which breaks step two. The `iam:PassedToService` condition on `PassRole` adds a second bound: project roles can only be handed to EC2, not to Lambda or any other service.
 
-`ec2:*` is broader than ideal. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can still create EC2 resources in the six allowed regions — but can no longer grant itself administrator access to the account.
+`ec2:*` is broader than least privilege. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can create, modify or delete EC2 and VPC resources in the six allowed regions, so prefer a dedicated account when that blast radius is unacceptable. The policy does prevent that caller from attaching an administrator policy to the project role.
 
-The `SessionManagerAccess` statement is what makes the SSM fallback usable: if your IP changes while travelling and SSH no longer matches the security group, you can still reach the instance with `aws ssm start-session --target <instance-id>`.
+The Session Manager statements keep the SSM fallback usable without granting a shell on every managed node in the account. `StartSession` is limited to instances tagged `Project=wireguard-vpn`, and a caller can resume or terminate only their own sessions. If you change `project_name`, update the tag value in this bootstrap policy to match.
 
 ---
 
