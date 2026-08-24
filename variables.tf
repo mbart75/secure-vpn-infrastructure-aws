@@ -158,7 +158,10 @@ variable "client_dns_servers" {
   default     = ["1.1.1.1", "1.0.0.1"]
 
   validation {
-    condition     = length(var.client_dns_servers) > 0
-    error_message = "At least one DNS server is required, otherwise clients leak DNS to their local network."
+    condition = length(var.client_dns_servers) > 0 && alltrue([
+      for resolver in var.client_dns_servers :
+      can(cidrhost("${resolver}/32", 0)) || can(cidrhost("${resolver}/128", 0))
+    ])
+    error_message = "Each DNS server must be a valid IPv4 or IPv6 address, and at least one server is required."
   }
 }
