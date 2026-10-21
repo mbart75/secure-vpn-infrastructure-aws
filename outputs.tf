@@ -47,17 +47,33 @@ output "security_audit" {
   value       = "${local.ssh_base} 'sudo /opt/wireguard/audit.sh'"
 }
 
-output "next_steps" {
-  description = "What to do once the apply completes."
-  value       = <<-EOT
+# ─── Post-deployment recap ────────────────────────────────────────────────────
+# Single source: this text feeds both the next_steps output and the local file
+# vpn-commands-<region>.txt. deploy.command prints it as is instead of writing
+# its own commands: two hand-written blocks had drifted into two different
+# destroy commands, one of them without aws-vault or the workspace.
+#
+# Nothing secret goes in here: an IP, a port, the PATH of the SSH key and
+# commands. WireGuard keys stay on the server, then in the .conf files.
 
-    Deployment complete. Server: ${aws_eip.wireguard.public_ip}
+locals {
+  commands_file = "${path.module}/vpn-commands-${var.aws_region}.txt"
 
-    1. Bootstrapping takes 2-5 minutes. Check when it is done:
+  # Credentials are only needed by the destroy itself, not by workspace select.
+  credentials_prefix = var.aws_vault_profile == null ? "" : "aws-vault exec --no-session ${var.aws_vault_profile} -- "
+  destroy_command    = "cd '${abspath(path.module)}' && terraform workspace select ${terraform.workspace} && ${local.credentials_prefix}terraform destroy -var='aws_region=${var.aws_region}'"
+
+  next_steps = <<-EOT
+
+    WireGuard VPN: ${var.aws_region}, server ${aws_eip.wireguard.public_ip}
+    Client endpoint: ${aws_eip.wireguard.public_ip}:${var.wireguard_port} (UDP)
+
+    1. Bootstrapping takes 2-5 minutes after the apply. Check when it is done:
          ${local.ssh_base} 'sudo test -f /var/lib/wireguard-setup.done && echo READY || echo IN_PROGRESS'
 
     2. Download your client configurations:
          scp -i ${local.ssh_private_key} -P ${var.ssh_port} ${local.ssh_target}:'~/wireguard-clients/*.conf' .
+       Delete them once imported: each .conf holds a device's private key.
 
     3. Mobile devices can scan a QR code instead:
          ${local.ssh_base} 'cat ~/wireguard-clients/${local.first_client}-qrcode.txt'
@@ -68,6 +84,31 @@ output "next_steps" {
 
     Destroy everything when you are done (an allocated IPv4 address is billed
     by the hour even while the instance is stopped):
-         terraform destroy
+         ${local.destroy_command}
+
+    These commands are also in ${abspath(local.commands_file)},
+    which the destroy removes. While the state exists:
+         terraform output -raw next_steps
   EOT
+}
+
+output "next_steps" {
+  description = "What to do once the apply completes. Print it with: terraform output -raw next_steps"
+  value       = local.next_steps
+  # Not a secret: marked sensitive only so the apply does not print it on top of
+  # deploy.command, which prints it once. -raw still shows it in clear.
+  sensitive = true
+}
+
+output "commands_file" {
+  description = "Local file holding this deployment's commands, removed on destroy."
+  value       = abspath(local.commands_file)
+}
+
+# Created on apply, removed on destroy: the commands outlive the terminal
+# window, not the infrastructure they describe. Git-ignored, mode 0600.
+resource "local_file" "commands" {
+  filename        = local.commands_file
+  content         = local.next_steps
+  file_permission = "0600"
 }

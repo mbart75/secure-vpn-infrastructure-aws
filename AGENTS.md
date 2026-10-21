@@ -17,7 +17,7 @@ and "Limitations" sections explain most choices that look odd.
 |---|---|
 | `main.tf` | Network, IAM instance role, security group, key pair, EIP, instance |
 | `variables.tf` | Every input, typed and validated |
-| `outputs.tf` | Ready-to-run SSH, scp and audit commands |
+| `outputs.tf` | Ready-to-run SSH, scp and audit commands; the `next_steps` recap, single source, also written to `vpn-commands-<region>.txt` (`local_file`, 0600, git-ignored, removed on destroy) |
 | `scripts/user_data.sh` | Bootstrap, rendered by `templatefile()` and run once as root by cloud-init |
 | `deploy.command`, `cleanup-vault.command` | Guided macOS scripts (aws-vault, workspaces) |
 | `tests/` | Contract tests run by CI (Python `unittest`, some drive `terraform test`) |
@@ -82,3 +82,7 @@ every pull request, with Terraform pinned in the workflow.
   character set: no apostrophes, no accents.
 - **One Terraform workspace per region.** Reusing a state across regions
   orphans the previous region's resources, which keep billing.
+- **One source for post-deployment commands**: `local.next_steps` in
+  `outputs.tf`. `deploy.command` prints it and writes no command of its own;
+  two hand-written blocks had drifted into two different destroy commands, one
+  without aws-vault or the workspace. The recap never holds key material.

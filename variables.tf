@@ -170,3 +170,19 @@ variable "client_dns_servers" {
     error_message = "Each DNS server must be a valid IPv4 or IPv6 address, and at least one server is required."
   }
 }
+
+variable "aws_vault_profile" {
+  description = <<-EOT
+    aws-vault profile the operator uses, only to render ready-to-run commands
+    (the destroy command in next_steps and in the commands file). deploy.command
+    sets it. Leave null when credentials come from elsewhere: the commands are
+    then rendered without the aws-vault prefix.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.aws_vault_profile == null || can(regex("^[A-Za-z0-9_.-]{1,64}$", var.aws_vault_profile))
+    error_message = "Must be an aws-vault profile name (letters, digits, dot, hyphen, underscore), or null."
+  }
+}

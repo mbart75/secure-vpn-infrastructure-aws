@@ -15,6 +15,7 @@ class RepositoryHygieneTest(unittest.TestCase):
             ".codex/config.toml",
             "graphify-out/graph.json",
             "tests/__pycache__/test_security.cpython-315.pyc",
+            "vpn-commands-eu-west-3.txt",
         ):
             result = subprocess.run(
                 ["git", "check-ignore", "--quiet", candidate],

@@ -11,6 +11,11 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.0"
     }
+    # Writes the local commands file on apply and removes it on destroy.
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 }
 
