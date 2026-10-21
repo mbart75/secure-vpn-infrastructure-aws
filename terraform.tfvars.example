@@ -60,6 +60,6 @@
 # --- Compute ------------------------------------------------------------------
 # instance_type = "t3.micro"
 
-# Pin the AMI for reproducible rebuilds. Unset resolves the current Ubuntu
-# 24.04 LTS image from Canonical's public SSM parameter.
+# Pin the AMI for reproducible rebuilds. Unset looks up the most recent
+# Ubuntu 24.04 LTS image published by Canonical.
 # ami_id = "ami-0123456789abcdef0"

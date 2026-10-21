@@ -24,12 +24,17 @@ variable "instance_type" {
   description = "EC2 instance type. t3.micro is free-tier eligible in most regions."
   type        = string
   default     = "t3.micro"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*\\.[a-z0-9]+$", var.instance_type))
+    error_message = "Must be an EC2 instance type such as t3.micro or t3.small."
+  }
 }
 
 variable "ami_id" {
   description = <<-EOT
-    Optional AMI to pin. When null, the current Ubuntu 24.04 LTS AMI is resolved
-    from Canonical's public SSM parameter. Pin this for reproducible rebuilds.
+    Optional AMI to pin. When null, the most recent Ubuntu 24.04 LTS AMI published
+    by Canonical is looked up. Pin this for reproducible rebuilds.
   EOT
   type        = string
   default     = null

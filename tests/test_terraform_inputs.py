@@ -78,5 +78,40 @@ class TerraformInputValidationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+    def test_instance_type_rejects_malformed_values(self):
+        result = self.run_variable_test(
+            """
+            run "reject_malformed_instance_type" {
+              command = plan
+
+              variables {
+                instance_type = "t3.micro; reboot"
+              }
+
+              expect_failures = [var.instance_type]
+            }
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_instance_type_accepts_real_type_names(self):
+        for instance_type in ("t3.micro", "t3a.small", "m7i-flex.large", "u-6tb1.metal"):
+            with self.subTest(instance_type=instance_type):
+                result = self.run_variable_test(
+                    f"""
+                    run "accept_instance_type" {{
+                      command = plan
+
+                      variables {{
+                        instance_type = "{instance_type}"
+                      }}
+                    }}
+                    """
+                )
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
