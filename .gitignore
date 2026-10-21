@@ -44,6 +44,7 @@ id_*_key
 
 # ── Local tooling and build output ────────────────────────────────────────────
 .claude/
+.codex/
 graphify-out/
 __pycache__/
 *.pyc
