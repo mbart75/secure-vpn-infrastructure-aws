@@ -1,0 +1,14 @@
+# Keeps the SHA-pinned actions in terraform.yml current. Terraform providers are
+# pinned by .terraform.lock.hcl and upgraded deliberately, in their own change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # Wait a week before adopting a new release: a compromised version is
+    # usually detected and pulled within days.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci

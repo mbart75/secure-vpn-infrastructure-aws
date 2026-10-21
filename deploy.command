@@ -22,8 +22,10 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# The login keychain syncs through iCloud Keychain, so the profile follows you
-# across Macs. Exported for this process only.
+# Keys go into the login keychain, which unlocks with the macOS session, rather
+# than into a separate aws-vault keychain with its own password. It is a local
+# file keychain: iCloud Keychain does not sync it, so each Mac needs its own
+# "aws-vault add". Exported for this process only.
 export AWS_VAULT_KEYCHAIN_NAME="login"
 AWS_PROFILE_NAME="wireguard"
 MIN_TERRAFORM_VERSION="1.5.0"
@@ -130,7 +132,11 @@ heading "[3/6] SSH key"
 SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
 if [ ! -f "$SSH_KEY_PATH.pub" ]; then
     mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-    ssh-keygen -t ed25519 -C "wireguard-aws" -f "$SSH_KEY_PATH" -N ""
+    # No -N "": ssh-keygen asks for a passphrase. A key without one is usable by
+    # anyone who copies the file, and this key opens a root-capable shell.
+    echo "  Creating an SSH key. Choose a passphrase when asked; macOS can keep it"
+    echo "  in the Keychain afterwards with: ssh-add --apple-use-keychain $SSH_KEY_PATH"
+    ssh-keygen -t ed25519 -C "wireguard-aws" -f "$SSH_KEY_PATH"
     info "Generated a new Ed25519 key."
 fi
 info "Using $SSH_KEY_PATH.pub"
