@@ -251,10 +251,10 @@ fi
 run_terraform apply -input=false "$PLAN_FILE"
 rm -f "$PLAN_FILE"
 
-# End time of the apply, taken right after it from this Mac's clock, time zone
-# included since it changes when travelling. The server is not polled: the
-# bootstrap keeps running for a few minutes, and this time is enough to know
-# when to check.
+# End time of the apply, taken right after it from the local clock of the
+# machine running this script, time zone included since it changes when
+# travelling. The server is not polled: the bootstrap keeps running for a few
+# minutes, and this time is enough to know when to check.
 END_TIME="$(date '+%Y-%m-%d %H:%M %Z')"
 
 # Single source: the next_steps output, which is also the content of
@@ -266,6 +266,6 @@ terraform output -raw next_steps || warn "Recap unavailable, run: terraform outp
 
 # Last, so it stays visible at the bottom of the terminal.
 echo ""
-info "Deployment finished at $END_TIME (this Mac's clock)"
+info "Deployment finished at $END_TIME (local time)"
 warn "WireGuard is still installing on the server: allow 2 to 5 more minutes"
 echo ""

@@ -93,10 +93,10 @@ bash deploy.command      # or double-click deploy.command in Finder
 
 The script checks and updates your toolchain via Homebrew, stores your AWS keys in the macOS Keychain with `aws-vault`, asks which region and which devices you want, shows you the plan, and applies it after you confirm.
 
-When the apply completes, it prints the recap described below once, then the time the apply finished, from your Mac's clock:
+When the apply completes, it prints the recap described below once, then the time the apply finished, in the local time of the machine that ran it:
 
 ```
-  Deployment finished at 2026-10-21 18:42 CEST (this Mac's clock)
+  Deployment finished at 2026-10-21 18:42 CEST (local time)
   WireGuard is still installing on the server: allow 2 to 5 more minutes
 ```
 
