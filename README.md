@@ -6,6 +6,7 @@ Ephemeral, hardened WireGuard VPN infrastructure defined entirely in Terraform. 
 [![AWS](https://img.shields.io/badge/AWS-EC2%20%7C%20VPC%20%7C%20IAM-FF9900?logo=amazonwebservices&logoColor=white)](https://aws.amazon.com)
 [![WireGuard](https://img.shields.io/badge/WireGuard-kernel%20native-88171A?logo=wireguard&logoColor=white)](https://www.wireguard.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+[![CI](https://github.com/mbart75/secure-vpn-infrastructure-aws/actions/workflows/terraform.yml/badge.svg?branch=main)](https://github.com/mbart75/secure-vpn-infrastructure-aws/actions/workflows/terraform.yml)
 
 ---
 
@@ -30,7 +31,7 @@ Ephemeral, hardened WireGuard VPN infrastructure defined entirely in Terraform. 
 <a id="why-this-exists"></a>
 ## 🎯 Why this exists
 
-Public Wi-Fi on the road is untrusted by default, and commercial VPN providers ask you to trade one trusted third party for another. This project provisions a VPN server that **you** own, on infrastructure **you** control, from a configuration you can read end to end in about 300 lines.
+Public Wi-Fi on the road is untrusted by default, and commercial VPN providers ask you to trade one trusted third party for another. This project provisions a VPN server that **you** own, on infrastructure **you** control, from a configuration small enough to read end to end: about 600 lines of Terraform and one bootstrap script.
 
 It is built to be ephemeral. Deploying takes one command, destroying takes one command, and nothing is left running between trips.
 
@@ -239,7 +240,7 @@ Two caveats worth stating. On a network whose acceptable use policy forbids circ
 | Control | Implementation |
 |---|---|
 | SSH authentication | Public key only; passwords and root login disabled; access limited to the `ubuntu` user |
-| SSH cryptography | Ed25519 host key only, DSA and ECDSA host keys deleted; modern ciphers and MACs; **hybrid post-quantum key exchange** when the installed OpenSSH offers one |
+| SSH cryptography | Only the Ed25519 host key is offered, DSA and ECDSA host keys deleted; modern ciphers and MACs; **hybrid post-quantum key exchange** when the installed OpenSSH offers one |
 | SSH configuration | Applied as a `sshd_config.d` drop-in, validated with `sshd -t` and rolled back automatically if invalid |
 | Brute force | `ufw limit` rate limiting, plus fail2ban banning for 24 hours after 3 failures in 10 minutes |
 | Firewall | UFW default-deny inbound, only the SSH and WireGuard ports opened |
@@ -251,7 +252,7 @@ Two caveats worth stating. On a network whose acceptable use policy forbids circ
 - **Modern cryptography** — WireGuard uses Curve25519, ChaCha20-Poly1305 and BLAKE2s, with no cipher negotiation to downgrade
 - **Per-client preshared keys** — an extra symmetric layer on top of the handshake, which also hardens the tunnel against future quantum attacks on the key exchange
 - **Post-quantum SSH key exchange** — the admin channel is covered too, see below
-- **Full tunnel** — clients route all IPv4 and IPv6 traffic through the VPN
+- **Full tunnel** — clients send all IPv4 and IPv6 traffic into the tunnel. IPv4 is forwarded to the internet; IPv6 is captured but not forwarded, since the server has no IPv6 egress, so it cannot leak around the VPN either
 - **DNS** — resolvers are pushed to clients so lookups travel inside the tunnel rather than leaking to the local network
 - **Key handling** — every private key is generated on the instance by `wg genkey` and never transits Terraform, so no key material ends up in state files or CI logs
 
@@ -463,7 +464,7 @@ Known gaps, in rough priority order:
 - **`ec2:*` in the deploy policy.** Restricted by region, not by resource. Narrowing it requires mapping each action this stack calls to its resource-level support.
 - **Local state.** No locking, no encryption at rest, no history. Fine for one operator, wrong for a team.
 - **Changing the client list replaces the instance.** Adding a device reissues keys for every device. Managing peers with `wg set` on a running server would avoid this.
-- **Automated testing is static only.** CI runs `fmt`, `validate`, `shellcheck` and a Trivy configuration scan; there is no `terraform test` suite exercising a real deployment.
+- **No automated end-to-end test.** CI runs `fmt`, `validate`, `shellcheck`, a Trivy configuration scan and contract tests: pinned actions, the scope of the documented IAM policy, input validation through `terraform test` in plan mode, and ignore rules. Nothing in CI exercises a real deployment; that is validated by hand.
 - **The guided script is macOS only.** The Terraform configuration itself is platform independent.
 
 ---
@@ -478,12 +479,17 @@ Known gaps, in rough priority order:
 ├── outputs.tf                  Connection details and ready-to-run commands
 ├── terraform.tfvars.example    Annotated configuration template
 ├── .terraform.lock.hcl         Provider versions and checksums (committed on purpose)
+├── AGENTS.md                   Briefing for coding agents (CLAUDE.md links to it)
+├── SECURITY.md                 How to report a vulnerability
 ├── deploy.command              Guided deployment for macOS
 ├── cleanup-vault.command       Removes the local aws-vault and ~/.aws entries
 ├── scripts/
 │   └── user_data.sh            Cloud-init bootstrap: WireGuard, firewall, hardening
-└── .github/workflows/
-    └── terraform.yml           fmt, validate, shellcheck, Trivy config scan
+├── tests/                      Contract tests run by CI
+└── .github/
+    ├── dependabot.yml          Keeps the SHA-pinned actions current
+    └── workflows/
+        └── terraform.yml       fmt, validate, shellcheck, Trivy config scan, tests
 ```
 
 ---
