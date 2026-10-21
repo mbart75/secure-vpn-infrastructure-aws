@@ -19,7 +19,6 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Keys go into the login keychain, which unlocks with the macOS session, rather
@@ -234,6 +233,7 @@ echo ""
 run_terraform plan -input=false \
     -var="aws_region=$AWS_REGION" \
     -var="wireguard_clients=$CLIENTS_HCL" \
+    -var="aws_vault_profile=$AWS_PROFILE_NAME" \
     -out="$PLAN_FILE"
 
 echo ""
@@ -251,11 +251,21 @@ fi
 run_terraform apply -input=false "$PLAN_FILE"
 rm -f "$PLAN_FILE"
 
+# End time of the apply, taken right after it from this Mac's clock, time zone
+# included since it changes when travelling. The server is not polled: the
+# bootstrap keeps running for a few minutes, and this time is enough to know
+# when to check.
+END_TIME="$(date '+%Y-%m-%d %H:%M %Z')"
+
+# Single source: the next_steps output, which is also the content of
+# vpn-commands-<region>.txt. No command is rewritten here, the destroy command
+# least of all: two hand-written versions had drifted apart.
+# `terraform output` reads the local state only, no AWS call.
 echo ""
-run_terraform output -raw next_steps
+terraform output -raw next_steps || warn "Recap unavailable, run: terraform output -raw next_steps"
+
+# Last, so it stays visible at the bottom of the terminal.
 echo ""
-echo -e "${CYAN}  To destroy everything later:${NC}"
-echo "    cd '$SCRIPT_DIR'"
-echo "    aws-vault exec --no-session $AWS_PROFILE_NAME -- terraform workspace select $AWS_REGION"
-echo "    aws-vault exec --no-session $AWS_PROFILE_NAME -- terraform destroy -var='aws_region=$AWS_REGION' -var='wireguard_clients=$CLIENTS_HCL'"
+info "Deployment finished at $END_TIME (this Mac's clock)"
+warn "WireGuard is still installing on the server: allow 2 to 5 more minutes"
 echo ""

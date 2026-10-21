@@ -93,6 +93,15 @@ bash deploy.command      # or double-click deploy.command in Finder
 
 The script checks and updates your toolchain via Homebrew, stores your AWS keys in the macOS Keychain with `aws-vault`, asks which region and which devices you want, shows you the plan, and applies it after you confirm.
 
+When the apply completes, it prints the recap described below once, then the time the apply finished, from your Mac's clock:
+
+```
+  Deployment finished at 2026-10-21 18:42 CEST (this Mac's clock)
+  WireGuard is still installing on the server: allow 2 to 5 more minutes
+```
+
+The server is not polled: that time only tells you when it is worth checking.
+
 It never installs Homebrew for you, never edits your shell profile, and never runs a Git command: nothing from your working copy is committed or pushed anywhere.
 
 ### Option B — plain Terraform (any platform)
@@ -111,11 +120,15 @@ Provide credentials the way you normally would: `AWS_PROFILE`, environment varia
 
 ### After the apply
 
-Bootstrapping the server takes two to five minutes. Terraform prints every command you need, already filled in with your IP, port and key path:
+Bootstrapping the server takes two to five minutes. Terraform renders every command you need, already filled in with your IP, port, key path, region and workspace, including the exact destroy command:
 
 ```bash
-terraform output next_steps
+terraform output -raw next_steps
 ```
+
+The output is marked sensitive only so that the apply does not print it on top of the guided script; it holds no secret, and `-raw` shows it in clear.
+
+The same recap is written to **`vpn-commands-<region>.txt`** at the repository root (mode `0600`, git-ignored). Terraform creates it on apply and **removes it on destroy**, so the commands outlive the terminal window but not the infrastructure. It holds an IP, a port, the path of your SSH key and commands: no key material. With `aws_vault_profile` set, as `deploy.command` does, the destroy command goes through `aws-vault`; otherwise it is rendered without the prefix, for whatever credentials you use.
 
 Check that the server has finished setting itself up:
 
@@ -136,6 +149,8 @@ $(terraform output -raw show_qr_code)
 ```
 
 ### Tearing it down
+
+Run the destroy command from the recap or from `vpn-commands-<region>.txt`: it selects the right workspace and passes the region. With the plain Terraform workflow and the defaults, it boils down to:
 
 ```bash
 terraform destroy
@@ -189,6 +204,7 @@ Names accept letters, digits, hyphens and underscores, up to 32 characters, and 
 | `client_dns_servers` | `["1.1.1.1", "1.0.0.1"]` | Resolvers pushed to clients |
 | `instance_type` | `t3.micro` | EC2 instance type |
 | `ami_id` | *latest Ubuntu 24.04* | Pin an AMI for reproducible rebuilds |
+| `aws_vault_profile` | `null` | aws-vault profile used to render the destroy command; set by `deploy.command` |
 
 Every variable is validated: invalid regions, malformed CIDRs, a private key passed where a public key is expected, or more clients than the VPN network can hold all fail at plan time with an explicit message.
 
@@ -476,7 +492,7 @@ Known gaps, in rough priority order:
 .
 ├── main.tf                     VPC, subnet, gateway, security group, IAM, EC2, Elastic IP
 ├── variables.tf                Inputs, all typed, documented and validated
-├── outputs.tf                  Connection details and ready-to-run commands
+├── outputs.tf                  Ready-to-run commands, the next_steps recap and vpn-commands-<region>.txt
 ├── terraform.tfvars.example    Annotated configuration template
 ├── .terraform.lock.hcl         Provider versions and checksums (committed on purpose)
 ├── AGENTS.md                   Briefing for coding agents (CLAUDE.md links to it)

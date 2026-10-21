@@ -32,6 +32,10 @@ override.tf.json
 *-qrcode.txt
 wireguard-clients/
 
+# Commands file written by Terraform on apply and removed on destroy. No secret
+# in it, but it is specific to one deployment (IP, local SSH key path).
+vpn-commands-*.txt
+
 # SSH private keys carry no extension, so the patterns above would miss a key
 # copied into the project directory.
 id_rsa
