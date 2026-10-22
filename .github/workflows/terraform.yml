@@ -51,8 +51,8 @@ jobs:
       # check has fewer moving parts and verifies what it executes.
       - name: Install Trivy
         env:
-          TRIVY_VERSION: "0.72.0"
-          TRIVY_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          TRIVY_VERSION: "0.76.1"
+          TRIVY_SHA256: "c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0"
         run: |
           base="https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION"
           archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
