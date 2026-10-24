@@ -163,7 +163,7 @@ This deletes everything, including the Elastic IP. Your next deployment gets a n
 <a id="configuring-your-devices"></a>
 ## 📱 Configuring your devices
 
-Every entry in `wireguard_clients` produces one `.conf` file and one QR code on the server, each with its own key pair, preshared key and address inside the tunnel. There is no shared configuration between devices, so you can revoke one by removing it and reapplying.
+Every entry in `wireguard_clients` produces one `.conf` file and one QR code on the server, each with its own key pair, preshared key and address inside the tunnel. There is no shared configuration between devices, so removing one and reapplying revokes it: the apply replaces the server, and the removed device's keys go with the old instance.
 
 **Choose at deploy time.** The guided script asks:
 
@@ -183,7 +183,17 @@ wireguard_clients = ["phone", "laptop", "tablet", "work-laptop"]
 terraform apply -var='wireguard_clients=["phone","laptop","tablet"]'
 ```
 
-Names accept letters, digits, hyphens and underscores, up to 32 characters, and must be unique. Addresses are allocated by Terraform from `vpn_network_cidr`, so a `/24` supports 253 devices. Adding or removing a device rewrites the server configuration, which replaces the instance and issues fresh keys for everyone.
+Names accept letters, digits, hyphens and underscores, up to 32 characters, and must be unique. Addresses are allocated by Terraform from `vpn_network_cidr`, so a `/24` supports 253 devices.
+
+**Adding or removing a device replaces the server.** The device list is rendered into the bootstrap script, which runs only at first boot. Applied in place, a new script would merely stop and start the instance, and WireGuard would keep its old peers, the removed one included. `user_data_replace_on_change` makes Terraform destroy the instance and create a new one instead. That is what turns a removal into a revocation, and it has consequences for every device:
+
+- **The tunnel is down for a few minutes**, while the old instance is destroyed and the new one bootstraps (two to five minutes).
+- **Every device needs its configuration again**, not only the one you added. The new server generates a new key pair for itself and for each device, so the old `.conf` files and QR codes stop working. Download and import them all again, as after the first deployment.
+- **The public IP does not change.** The Elastic IP is a separate resource: it is kept and associated with the new instance.
+- **SSH reports a changed host key.** The new instance has its own Ed25519 host key behind the same address. Remove the old entry before reconnecting: `ssh-keygen -R <ip>` with the default port, `ssh-keygen -R "[<ip>]:<ssh_port>"` otherwise.
+- **The new instance boots the latest Ubuntu 24.04 AMI**, unless `ami_id` is pinned, and the old disk is deleted with everything on it, logs included.
+
+Changing any other value rendered into the bootstrap script has the same effect: `ssh_port`, `wireguard_port`, `client_dns_servers`, `vpn_network_cidr` and `project_name`.
 
 ---
 
@@ -479,8 +489,8 @@ Known gaps, in rough priority order:
 - **IPv4 only.** No IPv6 ingress, so clients on IPv6-only networks cannot connect.
 - **`ec2:*` in the deploy policy.** Restricted by region, not by resource. Narrowing it requires mapping each action this stack calls to its resource-level support.
 - **Local state.** No locking, no encryption at rest, no history. Fine for one operator, wrong for a team.
-- **Changing the client list replaces the instance.** Adding a device reissues keys for every device. Managing peers with `wg set` on a running server would avoid this.
-- **No automated end-to-end test.** CI runs `fmt`, `validate`, `shellcheck`, a Trivy configuration scan and contract tests: pinned actions, the scope of the documented IAM policy, input validation through `terraform test` in plan mode, and ignore rules. Nothing in CI exercises a real deployment; that is validated by hand.
+- **Changing the client list replaces the instance.** Adding or removing a device reissues keys for every device, cuts the tunnel for a few minutes and means re-importing every configuration. Managing peers with `wg set` on a running server would avoid this.
+- **No automated end-to-end test.** CI runs `fmt`, `validate`, `shellcheck`, a Trivy configuration scan and contract tests: pinned actions, the scope of the documented IAM policy, input validation through `terraform test` in plan mode, the setting that replaces the instance when its bootstrap script changes, and ignore rules. Nothing in CI exercises a real deployment; that is validated by hand.
 - **The guided script is macOS only.** The Terraform configuration itself is platform independent.
 
 ---

@@ -333,6 +333,12 @@ resource "aws_instance" "wireguard" {
     client_dns         = join(", ", var.client_dns_servers)
   }))
 
+  # The bootstrap script runs once, at first boot. Applied in place, a new
+  # user_data would only stop and start the instance: WireGuard would keep its
+  # old peers, and a device removed from wireguard_clients would keep its
+  # access. Replacing the server is what makes removal a revocation.
+  user_data_replace_on_change = true
+
   tags = {
     Name = "${var.project_name}-server"
   }
