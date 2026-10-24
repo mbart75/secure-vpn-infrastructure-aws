@@ -112,6 +112,83 @@ class TerraformInputValidationTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    # Every other input rendered into scripts/user_data.sh by templatefile().
+    # client_dns_servers is covered above; server_public_ip comes from the EIP.
+
+    def test_project_name_rejects_shell_syntax(self):
+        result = self.run_variable_test(
+            r"""
+            run "reject_shell_syntax_in_project_name" {
+              command = plan
+
+              variables {
+                project_name = "vpn\"; touch /tmp/pwned #"
+              }
+
+              expect_failures = [var.project_name]
+            }
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_wireguard_clients_rejects_shell_syntax(self):
+        result = self.run_variable_test(
+            r"""
+            run "reject_shell_syntax_in_client_name" {
+              command = plan
+
+              variables {
+                wireguard_clients = ["phone", "laptop$(reboot)"]
+              }
+
+              expect_failures = [var.wireguard_clients]
+            }
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_vpn_network_cidr_rejects_anything_but_an_ipv4_cidr(self):
+        for value in ("10.8.0.0/24; reboot", "fd00::/64"):
+            with self.subTest(vpn_network_cidr=value):
+                result = self.run_variable_test(
+                    f"""
+                    run "reject_vpn_network_cidr" {{
+                      command = plan
+
+                      variables {{
+                        vpn_network_cidr = "{value}"
+                      }}
+
+                      expect_failures = [var.vpn_network_cidr]
+                    }}
+                    """
+                )
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ports_reject_out_of_range_values(self):
+        # Both are typed as numbers, so a string never reaches the template.
+        for variable in ("ssh_port", "wireguard_port"):
+            for value in (0, 65536):
+                with self.subTest(variable=variable, value=value):
+                    result = self.run_variable_test(
+                        f"""
+                        run "reject_out_of_range_port" {{
+                          command = plan
+
+                          variables {{
+                            {variable} = {value}
+                          }}
+
+                          expect_failures = [var.{variable}]
+                        }}
+                        """
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
