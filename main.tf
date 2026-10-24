@@ -163,6 +163,21 @@ resource "aws_route_table_association" "wireguard" {
 # ─── IAM ──────────────────────────────────────────────────────────────────────
 # The instance profile grants SSM Session Manager only: no static credentials on
 # the box, and a way back in when the SSH source IP no longer matches.
+#
+# AmazonSSMManagedInstanceCore is not used: it also grants ssm:GetParameter and
+# ssm:GetParameters on every parameter of the account, plus Run Command, State
+# Manager and inventory, none of which a shell fallback needs. The inline policy
+# below is the minimal Session Manager policy from the AWS documentation:
+# https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-create-iam-instance-profile.html
+
+locals {
+  # AWS managed policy used as the role's permissions boundary. It is Core
+  # without the parameter reads, and the deploy policy in the README only lets
+  # the deployer create or edit project roles that carry this exact boundary.
+  # Whatever inline policy ends up on the role, the instance can never exceed
+  # the boundary: no IAM, no parameter reads.
+  instance_permissions_boundary = "arn:aws:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy"
+}
 
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
@@ -177,13 +192,34 @@ data "aws_iam_policy_document" "ec2_assume_role" {
 }
 
 resource "aws_iam_role" "wireguard" {
-  name_prefix        = "${var.project_name}-"
-  assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+  name_prefix          = "${var.project_name}-"
+  assume_role_policy   = data.aws_iam_policy_document.ec2_assume_role.json
+  permissions_boundary = local.instance_permissions_boundary
 }
 
-resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.wireguard.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+# The SSM Agent registers the instance (UpdateInstanceInformation) and opens
+# the control and data channels a session runs through (ssmmessages). "*" as
+# AWS publishes it: the ssmmessages actions take no resource-level permission,
+# and naming this instance's ARN here would make the role depend on it.
+data "aws_iam_policy_document" "session_manager" {
+  statement {
+    sid    = "SessionManagerOnly"
+    effect = "Allow"
+    actions = [
+      "ssm:UpdateInstanceInformation",
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "session_manager" {
+  name   = "session-manager-only"
+  role   = aws_iam_role.wireguard.id
+  policy = data.aws_iam_policy_document.session_manager.json
 }
 
 resource "aws_iam_instance_profile" "wireguard" {

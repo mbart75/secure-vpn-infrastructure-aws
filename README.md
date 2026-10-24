@@ -39,7 +39,7 @@ It is built to be ephemeral. Deploying takes one command, destroying takes one c
 
 - **Ephemeral by default** — the whole stack is disposable; redeploying is faster than maintaining it
 - **No credentials on disk** — AWS keys live in the macOS Keychain via `aws-vault`, never in `~/.aws/credentials`
-- **No secrets in Terraform state** — every WireGuard private key is generated on the instance and never leaves it
+- **No secrets in Terraform state** — every WireGuard private key is generated on the instance, never by Terraform; a device's key leaves the server only inside the `.conf` file or QR code you fetch over SSH
 - **Self-contained networking** — a dedicated VPC, not the account's default VPC
 - **Bounded deployment identity** — project-scoped IAM and Session Manager access, region-scoped EC2 access, with the remaining EC2 breadth documented
 
@@ -67,11 +67,11 @@ Security group
   egress     all                     package updates and client traffic
 
 IAM
-  Instance role   AmazonSSMManagedInstanceCore   console access without SSH
+  Instance role   Session Manager actions only   console access without SSH
   Deploy user     project-scoped IAM/SSM; EC2 scoped to an allow-list of regions
 ```
 
-All resources are created by Terraform, so `terraform destroy` removes all of them.
+Every AWS resource of the stack is created by Terraform, so `terraform destroy` removes all of them. The deploy IAM user and its policy are the exception: you create them by hand once, as described in [IAM setup](#iam-setup), and they stay until you delete them.
 
 ---
 
@@ -139,13 +139,13 @@ eval "$(terraform output -raw ssh_command)" 'sudo test -f /var/lib/wireguard-set
 Then download your configuration files and import them into the WireGuard app:
 
 ```bash
-$(terraform output -raw fetch_client_configs)
+eval "$(terraform output -raw fetch_client_configs)"
 ```
 
 On a phone, scan the QR code instead:
 
 ```bash
-$(terraform output -raw show_qr_code)
+eval "$(terraform output -raw show_qr_code)"
 ```
 
 ### Tearing it down
@@ -216,7 +216,7 @@ Changing any other value rendered into the bootstrap script has the same effect:
 | `ami_id` | *latest Ubuntu 24.04* | Pin an AMI for reproducible rebuilds |
 | `aws_vault_profile` | `null` | aws-vault profile used to render the destroy command; set by `deploy.command` |
 
-Every variable is validated: invalid regions, malformed CIDRs, a private key passed where a public key is expected, or more clients than the VPN network can hold all fail at plan time with an explicit message.
+Every variable is validated: malformed region names or CIDRs, a private key passed where a public key is expected, or more clients than the VPN network can hold all fail at plan time with an explicit message.
 
 ### A note on the default ports
 
@@ -257,7 +257,7 @@ Two caveats worth stating. On a network whose acceptable use policy forbids circ
 | Ingress filtering | Security group allows only the WireGuard UDP port publicly; SSH is restricted to a single CIDR |
 | Instance metadata | IMDSv2 required, PUT hop limit of 1, instance tags not exposed via metadata |
 | Encryption at rest | EBS root volume encrypted |
-| Credentials | No static AWS credentials on the instance; the instance role grants Session Manager only |
+| Credentials | No static AWS credentials on the instance; the instance role allows the five Session Manager actions only, under a permissions boundary that excludes IAM and parameter reads |
 | Supply chain | `.terraform.lock.hcl` is committed, pinning provider versions and their checksums |
 | Local credentials | `aws-vault` keeps AWS keys in the macOS Keychain instead of a plaintext file |
 
@@ -288,7 +288,7 @@ Being explicit matters more than a longer feature list:
 
 - **The server sees your traffic.** A VPN moves the trust boundary to the exit node; it does not remove it. You are trusting yourself and AWS instead of a VPN vendor.
 - **Traffic is attributable to you.** A dedicated IP address used only by your devices is a stronger identifier than a shared commercial VPN pool. This is a tool for securing untrusted networks, not for anonymity.
-- **State is stored locally.** The default backend is a local state file with no locking or encryption at rest. That is appropriate for a single operator and unsuitable for a team; see [Design decisions](#design-decisions).
+- **State is stored locally.** The default backend is a local state file. Terraform locks it against concurrent runs on the same machine, but it is not encrypted at rest and only the previous version is kept as a backup. That is appropriate for a single operator and unsuitable for a team; see [Design decisions](#design-decisions).
 - **No IPv6 ingress.** The server is reachable over IPv4 only, so clients on IPv6-only networks cannot connect.
 
 ---
@@ -296,16 +296,16 @@ Being explicit matters more than a longer feature list:
 <a id="cost"></a>
 ## 💸 Cost
 
-Prices are for `eu-west-3` and exclude tax. Check the [AWS pricing pages](https://aws.amazon.com/ec2/pricing/on-demand/) for your region.
+Prices are AWS on-demand list prices for `eu-west-3` (Paris), in US dollars, excluding tax, as published on 24 October 2026 on the [EC2](https://aws.amazon.com/ec2/pricing/on-demand/), [EBS](https://aws.amazon.com/ebs/pricing/) and [VPC](https://aws.amazon.com/vpc/pricing/) pricing pages. Check them for your region and date: `us-east-1`, for instance, is cheaper.
 
 | Resource | While running | Free tier |
 |---|---|---|
-| EC2 `t3.micro` | ~$0.0104/hour, ~$7.60/month | 750 hours/month for 12 months on legacy free tier accounts |
-| Public IPv4 address | $0.005/hour, ~$3.65/month | Not free. Billed since 1 February 2024 whenever allocated, including while the instance is stopped |
-| EBS gp3, 8 GB | ~$0.64/month | 30 GB/month for 12 months on legacy free tier accounts |
-| Data transfer out | ~$0.09/GB | First 100 GB/month free account-wide |
+| EC2 `t3.micro` | $0.0118/hour, ~$8.61/month | 750 hours/month for 12 months on legacy free tier accounts |
+| Public IPv4 address | $0.005/hour, ~$3.65/month | 750 hours/month for 12 months on legacy free tier accounts, while attached to a running instance. Billed since 1 February 2024 otherwise, including while the instance is stopped |
+| EBS gp3, 8 GB | $0.0928/GB-month, ~$0.74/month | 30 GB/month for 12 months on legacy free tier accounts |
+| Data transfer out | $0.09/GB | First 100 GB/month free account-wide |
 
-**In practice:** roughly **$0.015/hour**, so about **$0.36/day** or **$2.50 for a week-long trip** on a paid account, and close to zero on an account still within the 12-month free tier apart from the IPv4 charge.
+**In practice:** roughly **$0.018/hour**, so about **$0.43/day** or **$3 for a week-long trip** on a paid account, before data transfer, and close to zero on an account still within the legacy 12-month free tier.
 
 Accounts created since mid-2025 use the newer credit-based free plan rather than the 12-month free tier, so the "free tier" column may not apply. Verify against your own [billing console](https://console.aws.amazon.com/billing/) rather than trusting this table.
 
@@ -366,14 +366,17 @@ Create a dedicated IAM user for deployments rather than using your root account 
       "Sid": "ControlOwnSessions",
       "Effect": "Allow",
       "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
-      "Resource": "arn:aws:ssm:*:*:session/${aws:userid}-*"
+      "Resource": [
+        "arn:aws:ssm:*:*:session/${aws:username}-*",
+        "arn:aws:ssm:*:*:session/${aws:userid}-*"
+      ]
     },
     {
       "Sid": "ManageProjectRoles",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole",
-        "iam:DetachRolePolicy",
+        "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole",
+        "iam:GetRolePolicy", "iam:DeleteRolePolicy", "iam:DetachRolePolicy",
         "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
         "iam:GetInstanceProfile", "iam:AddRoleToInstanceProfile",
         "iam:RemoveRoleFromInstanceProfile", "iam:ListInstanceProfilesForRole",
@@ -387,13 +390,15 @@ Create a dedicated IAM user for deployments rather than using your root account 
       ]
     },
     {
-      "Sid": "AttachOnlySsmCoreToProjectRoles",
+      "Sid": "GrantProjectRolesOnlyInsideTheBoundary",
       "Effect": "Allow",
-      "Action": "iam:AttachRolePolicy",
+      "Action": [
+        "iam:CreateRole", "iam:PutRolePolicy", "iam:PutRolePermissionsBoundary"
+      ],
       "Resource": "arn:aws:iam::*:role/wireguard-*",
       "Condition": {
         "ArnEquals": {
-          "iam:PolicyARN": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+          "iam:PermissionsBoundary": "arn:aws:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy"
         }
       }
     },
@@ -416,15 +421,17 @@ Create a dedicated IAM user for deployments rather than using your root account 
 }
 ```
 
-**Why `iam:AttachRolePolicy` sits in its own statement.** Grouping it with the other IAM actions and scoping it with `"Resource": "arn:aws:iam::*:role/wireguard-*"` looks locked down, but it is not. For that action, `Resource` names the role being modified — the target. It says nothing about *which policy* gets attached to it. Without a condition on `iam:PolicyARN`, the answer is: any policy, including `AdministratorAccess`.
+**Why role creation and `iam:PutRolePolicy` sit in their own statement.** Grouping them with the other IAM actions and scoping them with `"Resource": "arn:aws:iam::*:role/wireguard-*"` looks locked down, but it is not. For these actions, `Resource` names the role being created or modified — the target. It says nothing about *which permissions* the role ends up with. Without a condition, the answer is: any, including `"Action": "*"`.
 
-That turns the deploy key into a full privilege-escalation chain. Create a role named `wireguard-anything` (`CreateRole` allows it — the prefix is chosen by the caller, so it protects nothing), attach `AdministratorAccess` to it, wrap it in an instance profile, pass it to an EC2 instance (`PassRole` + `ec2:*`), then read the role's credentials from IMDS. Five steps, none of them exploiting a bug: every one is explicitly granted by the policy.
+That turns the deploy key into a full privilege-escalation chain. Create a role named `wireguard-anything` (`CreateRole` allows it — the prefix is chosen by the caller, so it protects nothing), give it an administrator policy, wrap it in an instance profile, pass it to an EC2 instance (`PassRole` + `ec2:*`), then read the role's credentials from IMDS. Five steps, none of them exploiting a bug: every one is explicitly granted by the policy.
 
-The `ArnEquals` condition on `iam:PolicyARN` restricts attachment to `AmazonSSMManagedInstanceCore`, the only policy this stack actually needs, which breaks step two. The `iam:PassedToService` condition on `PassRole` adds a second bound: project roles can only be handed to EC2, not to Lambda or any other service.
+The `iam:PermissionsBoundary` condition breaks step two. The deploy identity can create a project role, write its inline policy or set its boundary only when that boundary is `AmazonSSMManagedEC2InstanceDefaultPolicy`, an AWS managed policy nobody in your account can edit. A role's effective permissions are the intersection of its policies and its boundary, so whatever inline policy is written, the role can never exceed the boundary: SSM Agent operations, with no IAM access and no parameter reads. The stack itself writes a narrower inline policy, the five Session Manager actions; the boundary is the ceiling, not the grant. The policy grants neither `iam:AttachRolePolicy` nor `iam:DeleteRolePermissionsBoundary`, so a managed policy cannot be attached and the boundary cannot be removed. `iam:DetachRolePolicy`, and `iam:PutRolePermissionsBoundary` under the same condition, let an apply or a destroy migrate or clean up a role created by an earlier version of this stack, which attached `AmazonSSMManagedInstanceCore` and had no boundary. The `iam:PassedToService` condition on `PassRole` adds a second bound: project roles can only be handed to EC2, not to Lambda or any other service. This follows the delegation pattern of the [AWS documentation on permissions boundaries](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html#access_policies_boundaries-delegate).
 
-`ec2:*` is broader than least privilege. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can create, modify or delete EC2 and VPC resources in the six allowed regions, so prefer a dedicated account when that blast radius is unacceptable. The policy does prevent that caller from attaching an administrator policy to the project role.
+`ec2:*` is broader than least privilege. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can create, modify or delete EC2 and VPC resources in the six allowed regions, so prefer a dedicated account when that blast radius is unacceptable. The policy does prevent that caller from giving a project role more than its boundary allows.
 
-The Session Manager statements keep the SSM fallback usable without granting a shell on every managed node in the account. `StartSession` is limited to instances tagged `Project=wireguard-vpn`, and a caller can resume or terminate only their own sessions. If you change `project_name`, update the tag value in this bootstrap policy to match.
+The Session Manager statements keep the SSM fallback usable without granting a shell on every managed node in the account. `StartSession` is limited to instances tagged `Project=wireguard-vpn`, and a caller can resume or terminate only their own sessions. A session ID starts with the name of the IAM user who opened it, which `${aws:username}` matches, as the [AWS sample policies](https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-restrict-access-examples.html#restrict-access-example-user-sessions) prescribe for IAM users; `${aws:userid}` is the variable the same samples use for federated callers.
+
+The role, the instance profile and the `Project` tag are all named after `project_name`. If you change it, update this deploy policy to match: the tag value whenever it differs from `wireguard-vpn`, and the `wireguard-*` prefixes as well when it no longer starts with `wireguard-`. Otherwise the apply fails on `iam:CreateRole` and Session Manager refuses the instance.
 
 ---
 
@@ -441,10 +448,10 @@ terraform output security_audit         # run the on-server audit
 terraform output check_setup_status     # tail the bootstrap log
 ```
 
-The audit script reports installed versions, pending security updates, listening ports, firewall state, fail2ban status and connected peers:
+The audit script reports the OS, kernel, WireGuard and OpenSSH versions, the address SSH listens on, pending security updates, the firewall rules, the fail2ban SSH jail and each WireGuard peer with its latest handshake:
 
 ```bash
-$(terraform output -raw security_audit)
+eval "$(terraform output -raw security_audit)"
 ```
 
 Deploying to more than one region is supported through Terraform workspaces, one per region. The guided script handles this automatically; by hand:
@@ -469,7 +476,7 @@ Notes on the trade-offs, since the reasoning is more interesting than the resour
 
 **Private keys are generated on the instance.** Terraform could generate them with the `tls` provider, but anything Terraform generates is written to state in plaintext. Generating them on the server keeps the state file free of secrets, at the cost of retrieving configurations over SSH.
 
-**The SSH key exchange list is detected, not hardcoded.** A pinned `KexAlgorithms` list freezes cryptography at the date it was written and eventually becomes weaker than the upstream default — recent OpenSSH clients now warn that such a session is open to *store now, decrypt later*, where an adversary records traffic today and decrypts it once a quantum computer can break the classical exchange. Hybrid exchanges combine a classical and a lattice-based secret so both must fall. The list is therefore built from what `ssh -Q KexAlgorithms` reports on the instance: `mlkem768x25519-sha256` when present, `sntrup761x25519-sha512@openssh.com` otherwise. Hardcoding the former would break sshd on Ubuntu 24.04, whose OpenSSH 9.6 only gained it in 9.9, and lock the operator out; detecting it means the stronger algorithm is adopted on its own as unattended-upgrades moves OpenSSH forward.
+**The SSH key exchange list is detected, not hardcoded.** A pinned `KexAlgorithms` list freezes cryptography at the date it was written and eventually becomes weaker than the upstream default — recent OpenSSH clients now warn that such a session is open to *store now, decrypt later*, where an adversary records traffic today and decrypts it once a quantum computer can break the classical exchange. Hybrid exchanges combine a classical and a lattice-based secret so both must fall. The list is therefore built from what `ssh -Q KexAlgorithms` reports on the instance at bootstrap: `mlkem768x25519-sha256` when present, `sntrup761x25519-sha512@openssh.com` otherwise. Hardcoding the former would break sshd on Ubuntu 24.04, which ships OpenSSH 9.6 while ML-KEM arrived in OpenSSH 9.9, and lock the operator out. On Ubuntu 24.04 the server therefore negotiates `sntrup761x25519`. Security updates keep OpenSSH at 9.6 and the list is not detected again after the first boot, so ML-KEM is only picked up by a server built from a newer image, through `ami_id`.
 
 **SSH hardening is a drop-in, not a rewrite.** Replacing `/etc/ssh/sshd_config` wholesale drops the `Include` directive that Ubuntu ships and makes every `openssh-server` upgrade a conffile conflict, which is a poor outcome on a box that patches itself. A file in `sshd_config.d` overrides what it needs and leaves the packaged configuration to keep receiving upstream fixes.
 
@@ -488,9 +495,10 @@ Known gaps, in rough priority order:
 
 - **IPv4 only.** No IPv6 ingress, so clients on IPv6-only networks cannot connect.
 - **`ec2:*` in the deploy policy.** Restricted by region, not by resource. Narrowing it requires mapping each action this stack calls to its resource-level support.
-- **Local state.** No locking, no encryption at rest, no history. Fine for one operator, wrong for a team.
+- **Local state.** Locked on the local filesystem only, not encrypted at rest, one backup copy and no version history. Fine for one operator, wrong for a team.
 - **Changing the client list replaces the instance.** Adding or removing a device reissues keys for every device, cuts the tunnel for a few minutes and means re-importing every configuration. Managing peers with `wg set` on a running server would avoid this.
-- **No automated end-to-end test.** CI runs `fmt`, `validate`, `shellcheck`, a Trivy configuration scan and contract tests: pinned actions, the scope of the documented IAM policy, input validation through `terraform test` in plan mode, the setting that replaces the instance when its bootstrap script changes, and ignore rules. Nothing in CI exercises a real deployment; that is validated by hand.
+- **No automated end-to-end test.** CI runs `fmt`, `validate`, `shellcheck`, a Trivy configuration scan and contract tests: actions pinned to commit SHAs and the Trivy archive checksum, the scope of the documented deploy policy, the instance role limited to Session Manager, validation of every input rendered into the bootstrap script, the setting that replaces the instance when its bootstrap script changes, the post-deployment commands file, and the git-ignore and scanner-ignore rules. The Terraform tests run `terraform test` in plan mode with mocked providers. Nothing in CI exercises a real deployment; that is validated by hand.
+- **Unrestricted egress.** The security group allows all outbound traffic, because a full-tunnel VPN has to reach arbitrary destinations on behalf of its clients. A compromised server could reach them too.
 - **The guided script is macOS only.** The Terraform configuration itself is platform independent.
 
 ---

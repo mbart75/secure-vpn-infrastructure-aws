@@ -86,3 +86,15 @@ every pull request, with Terraform pinned in the workflow.
   `outputs.tf`. `deploy.command` prints it and writes no command of its own;
   two hand-written blocks had drifted into two different destroy commands, one
   without aws-vault or the workspace. The recap never holds key material.
+- **Any change to the instance role's permissions goes through the
+  boundary.** The deploy policy in the README lets the deployer create a
+  project role or write its policy only with the
+  `AmazonSSMManagedEC2InstanceDefaultPolicy` permissions boundary. Granting
+  `iam:PutRolePolicy`, `iam:CreateRole` or `iam:AttachRolePolicy` without that
+  condition reopens the escalation chain the README describes: an
+  administrator policy on a `wireguard-*` role, passed to an instance, read
+  from IMDS. A permission the instance needs beyond the boundary means
+  changing the boundary, not dropping the condition.
+- **Commands rendered by `terraform output` contain quotes**, for the remote
+  command or path. Run them with `eval "$(terraform output -raw …)"`: a bare
+  `$(…)` passes the quotes to ssh and scp literally.
