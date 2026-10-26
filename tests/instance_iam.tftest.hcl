@@ -77,6 +77,14 @@ run "instance_role_is_session_manager_only" {
   }
 
   assert {
+    condition = (
+      aws_iam_role.wireguard.name_prefix == "wireguard-vpn-" &&
+      aws_iam_instance_profile.wireguard.name_prefix == "wireguard-vpn-"
+    )
+    error_message = "With the default project_name, the role and instance profile must be named wireguard-vpn-*, the only prefix the README deploy policy grants."
+  }
+
+  assert {
     condition     = aws_iam_role_policy.session_manager.policy == data.aws_iam_policy_document.session_manager.json
     error_message = "The inline policy on the instance role must be the Session Manager policy document."
   }

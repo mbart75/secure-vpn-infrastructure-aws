@@ -70,7 +70,7 @@ class IamPolicyTest(unittest.TestCase):
     def test_project_roles_can_only_be_granted_inside_the_boundary(self):
         # CreateRole, PutRolePolicy or PutRolePermissionsBoundary without this
         # condition let the deploy key write an administrator policy on a
-        # wireguard-* role, pass it to an instance and read it from IMDS.
+        # wireguard-vpn-* role, pass it to an instance and read it from IMDS.
         boundary = "arn:aws:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy"
         policy = documented_iam_policy()
 
@@ -108,6 +108,50 @@ class IamPolicyTest(unittest.TestCase):
                 [action for action in actions if action.startswith("iam:") and "*" in action],
                 statement["Sid"],
             )
+
+    def test_iam_statements_only_reach_this_projects_roles(self):
+        # PassRole takes no iam:PermissionsBoundary condition (Service
+        # Authorization Reference), so the name prefix is all that keeps the
+        # deploy key from passing an unrelated wireguard-* role to an instance.
+        # main.tf names the role and the instance profile "${project_name}-".
+        expected = {
+            "role": "arn:aws:iam::*:role/wireguard-vpn-*",
+            "instance-profile": "arn:aws:iam::*:instance-profile/wireguard-vpn-*",
+        }
+        policy = documented_iam_policy()
+        iam_statements = [
+            statement
+            for statement in policy["Statement"]
+            if any(
+                action.startswith("iam:")
+                for action in (
+                    [statement["Action"]]
+                    if isinstance(statement["Action"], str)
+                    else statement["Action"]
+                )
+            )
+        ]
+
+        self.assertTrue(iam_statements)
+        for statement in iam_statements:
+            resources = statement["Resource"]
+            if isinstance(resources, str):
+                resources = [resources]
+            with self.subTest(statement=statement["Sid"]):
+                for resource in resources:
+                    resource_type = resource.split(":", 5)[5].split("/", 1)[0]
+                    self.assertEqual(resource, expected.get(resource_type), resource)
+
+    def test_pass_role_is_limited_to_project_roles_passed_to_ec2(self):
+        statements = statements_for_action(documented_iam_policy(), "iam:PassRole")
+
+        self.assertEqual(len(statements), 1)
+        self.assertEqual(statements[0]["Action"], "iam:PassRole")
+        self.assertEqual(statements[0]["Resource"], "arn:aws:iam::*:role/wireguard-vpn-*")
+        self.assertEqual(
+            statements[0].get("Condition"),
+            {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}},
+        )
 
     def test_instance_role_boundary_matches_the_deploy_policy(self):
         main_tf = (REPO_ROOT / "main.tf").read_text(encoding="utf-8")
