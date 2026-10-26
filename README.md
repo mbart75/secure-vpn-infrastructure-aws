@@ -385,8 +385,8 @@ Create a dedicated IAM user for deployments rather than using your root account 
         "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"
       ],
       "Resource": [
-        "arn:aws:iam::*:role/wireguard-*",
-        "arn:aws:iam::*:instance-profile/wireguard-*"
+        "arn:aws:iam::*:role/wireguard-vpn-*",
+        "arn:aws:iam::*:instance-profile/wireguard-vpn-*"
       ]
     },
     {
@@ -395,7 +395,7 @@ Create a dedicated IAM user for deployments rather than using your root account 
       "Action": [
         "iam:CreateRole", "iam:PutRolePolicy", "iam:PutRolePermissionsBoundary"
       ],
-      "Resource": "arn:aws:iam::*:role/wireguard-*",
+      "Resource": "arn:aws:iam::*:role/wireguard-vpn-*",
       "Condition": {
         "ArnEquals": {
           "iam:PermissionsBoundary": "arn:aws:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy"
@@ -406,7 +406,7 @@ Create a dedicated IAM user for deployments rather than using your root account 
       "Sid": "PassProjectRoleToEc2Only",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::*:role/wireguard-*",
+      "Resource": "arn:aws:iam::*:role/wireguard-vpn-*",
       "Condition": {
         "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" }
       }
@@ -421,17 +421,19 @@ Create a dedicated IAM user for deployments rather than using your root account 
 }
 ```
 
-**Why role creation and `iam:PutRolePolicy` sit in their own statement.** Grouping them with the other IAM actions and scoping them with `"Resource": "arn:aws:iam::*:role/wireguard-*"` looks locked down, but it is not. For these actions, `Resource` names the role being created or modified — the target. It says nothing about *which permissions* the role ends up with. Without a condition, the answer is: any, including `"Action": "*"`.
+**Why role creation and `iam:PutRolePolicy` sit in their own statement.** Grouping them with the other IAM actions and scoping them with `"Resource": "arn:aws:iam::*:role/wireguard-vpn-*"` looks locked down, but it is not. For these actions, `Resource` names the role being created or modified — the target. It says nothing about *which permissions* the role ends up with. Without a condition, the answer is: any, including `"Action": "*"`.
 
-That turns the deploy key into a full privilege-escalation chain. Create a role named `wireguard-anything` (`CreateRole` allows it — the prefix is chosen by the caller, so it protects nothing), give it an administrator policy, wrap it in an instance profile, pass it to an EC2 instance (`PassRole` + `ec2:*`), then read the role's credentials from IMDS. Five steps, none of them exploiting a bug: every one is explicitly granted by the policy.
+That turns the deploy key into a full privilege-escalation chain. Create a role named `wireguard-vpn-anything` (`CreateRole` allows it — the prefix is chosen by the caller, so it protects nothing), give it an administrator policy, wrap it in an instance profile, pass it to an EC2 instance (`PassRole` + `ec2:*`), then read the role's credentials from IMDS. Five steps, none of them exploiting a bug: every one is explicitly granted by the policy.
 
 The `iam:PermissionsBoundary` condition breaks step two. The deploy identity can create a project role, write its inline policy or set its boundary only when that boundary is `AmazonSSMManagedEC2InstanceDefaultPolicy`, an AWS managed policy nobody in your account can edit. A role's effective permissions are the intersection of its policies and its boundary, so whatever inline policy is written, the role can never exceed the boundary: SSM Agent operations, with no IAM access and no parameter reads. The stack itself writes a narrower inline policy, the five Session Manager actions; the boundary is the ceiling, not the grant. The policy grants neither `iam:AttachRolePolicy` nor `iam:DeleteRolePermissionsBoundary`, so a managed policy cannot be attached and the boundary cannot be removed. `iam:DetachRolePolicy`, and `iam:PutRolePermissionsBoundary` under the same condition, let an apply or a destroy migrate or clean up a role created by an earlier version of this stack, which attached `AmazonSSMManagedInstanceCore` and had no boundary. The `iam:PassedToService` condition on `PassRole` adds a second bound: project roles can only be handed to EC2, not to Lambda or any other service. This follows the delegation pattern of the [AWS documentation on permissions boundaries](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html#access_policies_boundaries-delegate).
+
+**Why `PassRole` is scoped by name.** The boundary condition covers the roles the deploy identity creates or edits, not the roles it passes. `iam:PassRole` supports no `iam:PermissionsBoundary` condition key ([Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam.html#list_iam-actions-as-permissions)), so the policy cannot require a passed role to carry the boundary. AWS also advises against gating `PassRole` on role tags, which give unreliable results ([Grant a user permissions to pass a role](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html)), and a tag would protect nothing here: the policy grants `iam:TagRole` on project roles. What remains is the name and the service. Every IAM statement is scoped to `wireguard-vpn-*`, the prefix `main.tf` gives the role and the instance profile with the default `project_name`, so the key cannot pass, edit or delete any other `wireguard-*` role of the account. [`iam:PassedToService`](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#ck_PassedToService) limits `PassRole` to EC2. The name cannot be pinned further: Terraform appends a unique suffix to the prefix, and it has to, because IAM names are global to the account and each regional deployment creates its own role. A `wireguard-vpn-*` role that this stack did not create can still be passed to an instance, see [Limitations](#limitations).
 
 `ec2:*` is broader than least privilege. EC2 resource-level permissions do not cover every action this stack needs, in particular several `Describe*` calls that ignore resource conditions, so the region condition carries most of the restriction. Narrowing this further is on the [roadmap](#limitations). A caller holding the key can create, modify or delete EC2 and VPC resources in the six allowed regions, so prefer a dedicated account when that blast radius is unacceptable. The policy does prevent that caller from giving a project role more than its boundary allows.
 
 The Session Manager statements keep the SSM fallback usable without granting a shell on every managed node in the account. `StartSession` is limited to instances tagged `Project=wireguard-vpn`, and a caller can resume or terminate only their own sessions. A session ID starts with the name of the IAM user who opened it, which `${aws:username}` matches, as the [AWS sample policies](https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-restrict-access-examples.html#restrict-access-example-user-sessions) prescribe for IAM users; `${aws:userid}` is the variable the same samples use for federated callers.
 
-The role, the instance profile and the `Project` tag are all named after `project_name`. If you change it, update this deploy policy to match: the tag value whenever it differs from `wireguard-vpn`, and the `wireguard-*` prefixes as well when it no longer starts with `wireguard-`. Otherwise the apply fails on `iam:CreateRole` and Session Manager refuses the instance.
+The role, the instance profile and the `Project` tag are all named after `project_name`. If you change it, replace `wireguard-vpn` everywhere in this deploy policy with the new value: the `Project` tag and the `wireguard-vpn-*` prefixes. Otherwise the apply fails on `iam:CreateRole` and Session Manager refuses the instance.
 
 ---
 
@@ -494,6 +496,7 @@ Notes on the trade-offs, since the reasoning is more interesting than the resour
 Known gaps, in rough priority order:
 
 - **IPv4 only.** No IPv6 ingress, so clients on IPv6-only networks cannot connect.
+- **`PassRole` trusts the role name.** The deploy key can pass to an EC2 instance any role whose name starts with `wireguard-vpn-`, including one that already exists in the account and that this stack did not create. Such a role may carry broad permissions and no boundary, and its credentials would then be readable from the instance metadata. AWS offers no `PassRole` condition on the passed role's boundary. Before granting the deploy policy, check that `aws iam list-roles --query "Roles[?starts_with(RoleName, 'wireguard-vpn-')].RoleName"` lists none that you did not deploy, or use a dedicated account.
 - **`ec2:*` in the deploy policy.** Restricted by region, not by resource. Narrowing it requires mapping each action this stack calls to its resource-level support.
 - **Local state.** Locked on the local filesystem only, not encrypted at rest, one backup copy and no version history. Fine for one operator, wrong for a team.
 - **Changing the client list replaces the instance.** Adding or removing a device reissues keys for every device, cuts the tunnel for a few minutes and means re-importing every configuration. Managing peers with `wg set` on a running server would avoid this.

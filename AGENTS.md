@@ -92,9 +92,11 @@ every pull request, with Terraform pinned in the workflow.
   `AmazonSSMManagedEC2InstanceDefaultPolicy` permissions boundary. Granting
   `iam:PutRolePolicy`, `iam:CreateRole` or `iam:AttachRolePolicy` without that
   condition reopens the escalation chain the README describes: an
-  administrator policy on a `wireguard-*` role, passed to an instance, read
+  administrator policy on a `wireguard-vpn-*` role, passed to an instance, read
   from IMDS. A permission the instance needs beyond the boundary means
-  changing the boundary, not dropping the condition.
+  changing the boundary, not dropping the condition. `iam:PassRole` takes no
+  boundary condition, so its only limits are the `wireguard-vpn-*` prefix,
+  shared by every IAM statement, and `iam:PassedToService`: never widen them.
 - **Commands rendered by `terraform output` contain quotes**, for the remote
   command or path. Run them with `eval "$(terraform output -raw …)"`: a bare
   `$(…)` passes the quotes to ssh and scp literally.
