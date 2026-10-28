@@ -110,8 +110,10 @@ mkdir -p /etc/ssh/sshd_config.d
 # The list is built from what the installed binary actually supports.
 # Hardcoding mlkem768x25519-sha256 would break sshd on Ubuntu 24.04, whose
 # OpenSSH 9.6 only gained it in 9.9 — sshd would refuse to start and lock the
-# operator out. As unattended-upgrades moves OpenSSH forward, the stronger
-# algorithm is picked up on its own.
+# operator out. The list is detected once, at first boot, and security updates
+# keep OpenSSH at 9.6 on Ubuntu 24.04, newer 24.04 AMIs included: ML-KEM only
+# arrives with a new server built from an image that ships OpenSSH 9.9 or later,
+# such as a newer Ubuntu release pinned through ami_id.
 PQ_KEX=""
 for ALG in mlkem768x25519-sha256 sntrup761x25519-sha512@openssh.com sntrup761x25519-sha512; do
   if ssh -Q KexAlgorithms 2> /dev/null | grep -qx "$ALG"; then
